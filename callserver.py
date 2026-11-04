@@ -177,6 +177,7 @@ class Call:
         self.interrupted = False
         await self.send({'type': 'state', 'v': 'speaking'})
         log_line(f'cc：{text}')
+        await self.send({'type': 'line', 'who': 'cc', 'text': text})
         watcher = asyncio.create_task(self._watch_interrupt())
         n = 0
         t0 = time.monotonic()
@@ -281,6 +282,7 @@ class Call:
                 await self.say('没听清，再说一遍？')
                 continue
             log_line(f'南山：{heard}')
+            await self.send({'type': 'line', 'who': 'you', 'text': heard})
             reply = await think(heard)
             hang = '[挂断]' in reply
             reply = reply.replace('[挂断]', '').strip()
@@ -328,6 +330,7 @@ class Server:
                         # 她不想出声时手机上打字也行
                         self.call.audio_q.put_nowait(b'')
                         log_line(f'南山(打字)：{ev["text"]}')
+                        await self.call.send({'type': 'line', 'who': 'you', 'text': ev['text']})
                         reply = await think(ev['text'])
                         await self.call.say(reply.replace('[挂断]', ''))
         finally:

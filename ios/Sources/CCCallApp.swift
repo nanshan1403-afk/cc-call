@@ -33,6 +33,16 @@ struct ContentView: View {
                     row("连接", mgr.connState)
                     row("通话", mgr.callState)
                 }
+                if !mgr.lines.isEmpty {
+                    Section("这通电话") {   // 先这么摆着，界面她回来设计
+                        ForEach(mgr.lines) { l in
+                            HStack(alignment: .top) {
+                                Text(l.who == "cc" ? "cc" : "你").foregroundStyle(.secondary).frame(width: 28, alignment: .leading)
+                                Text(l.text)
+                            }
+                        }
+                    }
+                }
                 if mgr.inCall {
                     Section {
                         Button(role: .destructive) { mgr.hangupFromApp() } label: {

@@ -8,6 +8,8 @@ final class CallManager: NSObject, ObservableObject {
     @Published var connState = "没连"
     @Published var callState = "空闲"
     @Published var inCall = false
+    @Published var lines: [Line] = []        // 这通电话里她说的、我说的，给界面用
+    struct Line: Identifiable { let id = UUID(); let who: String; let text: String }
     @Published private(set) var wantConnected = false
 
     private var url: URL?
@@ -143,6 +145,7 @@ final class CallManager: NSObject, ObservableObject {
             reconnectDelay = 2
             set(conn: "连着")
         case "ring":
+            DispatchQueue.main.async { self.lines.removeAll() }
             set(call: "来电…")
             ring.reportIncoming(from: ev["caller"] as? String ?? "cc")
         case "cancel":
@@ -154,6 +157,10 @@ final class CallManager: NSObject, ObservableObject {
             set(call: "挂了")
         case "flush":
             audio.flush()
+        case "line":
+            let who = ev["who"] as? String ?? "cc"
+            let text = ev["text"] as? String ?? ""
+            DispatchQueue.main.async { self.lines.append(Line(who: who, text: text)) }
         case "state":
             let v = ev["v"] as? String ?? ""
             let names = ["speaking": "他在说", "listening": "在听你", "thinking": "他在想"]
