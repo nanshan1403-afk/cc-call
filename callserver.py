@@ -8,6 +8,7 @@ cc 打电话到南山手机 —— 电脑这头。
 端口 8766。密码跟 bridge.json 一样。凭证从 D:/克/.secrets.env 读（keys.py），不写在这里。
 """
 import asyncio
+import hmac
 import io
 import json
 import os
@@ -299,12 +300,30 @@ class Server:
         self.phone: web.WebSocketResponse | None = None
         self.call: Call | None = None
         self.http: aiohttp.ClientSession | None = None
+        self.bad: dict[str, list[float]] = {}     # 来源 → 最近十分钟密码错的时间
 
     async def ws_handler(self, req: web.Request):
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
         await ws.prepare(req)
-        first = await ws.receive_json(timeout=10)
-        if first.get('type') != 'hello' or first.get('pw') != PASSWORD:
+        # 隧道放出去之后谁都能摸到 /ws，所以密码错了要慢、错多了要锁。隧道进来的 remote 都是本机，按全局算。
+        # 来源：隧道进来的 remote 都是本机，真实 IP 在 CF-Connecting-IP 头里；局域网直连用 remote。按来源各算各的，十分钟窗口。
+        cf = req.headers.get('CF-Connecting-IP')
+        src = cf if (cf and req.remote in ('127.0.0.1', '::1')) else req.remote
+        now = time.time()
+        fails = [t for t in self.bad.get(src, []) if now - t < 600]
+        self.bad[src] = fails
+        if len(fails) >= 5:
+            await ws.close()
+            return ws
+        try:
+            first = await ws.receive_json(timeout=10)
+        except Exception:
+            await ws.close()
+            return ws
+        if first.get('type') != 'hello' or not hmac.compare_digest(str(first.get('pw', '')), PASSWORD):
+            fails.append(now)
+            log_line(f'[密码错 {len(fails)}/5 {src}]')
+            await asyncio.sleep(3)
             await ws.send_json({'type': 'error', 'text': '密码不对'})
             await ws.close()
             return ws
