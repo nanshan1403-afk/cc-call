@@ -105,10 +105,13 @@ final class CallManager: NSObject, ObservableObject {
             switch result {
             case .failure(let e):
                 self.set(conn: "断了：\(e.localizedDescription)")
-                if self.inCall {
-                    self.ring.failCall()
-                    DispatchQueue.main.async { self.inCall = false }
-                    self.set(call: "断线")
+                DispatchQueue.main.async {
+                    // 响着没接的也算，不然来电界面会一直挂着
+                    if self.ring.hasCall {
+                        self.ring.failCall()
+                        self.inCall = false
+                        self.callState = "断线"
+                    }
                 }
                 self.scheduleReconnect()
             case .success(let msg):

@@ -114,6 +114,7 @@ final class AudioIO {
 final class KeepAlive {
     private var player: AVAudioPlayer?
     private var wanted = false
+    private var paused = false           // 通话中让位了，别让打断恢复把通话的 session 冲掉
     private var observer: NSObjectProtocol?
 
     func start() {
@@ -122,7 +123,7 @@ final class KeepAlive {
             observer = NotificationCenter.default.addObserver(
                 forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
                 // 真电话、Siri、闹钟打断完了，把无声再放起来
-                guard let self, self.wanted,
+                guard let self, self.wanted, !self.paused,
                       let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                       AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
                 self.resume()
@@ -135,6 +136,7 @@ final class KeepAlive {
     /// 通话结束后 CallKit 会把 session 关掉、category 也留在通话那套；这里全部设回来。
     func resume() {
         guard wanted else { return }
+        paused = false
         let s = AVAudioSession.sharedInstance()
         try? s.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth])
         try? s.setActive(true)
@@ -152,6 +154,7 @@ final class KeepAlive {
 
     /// 接电话前让位：CallKit 要自己激活 session，我们先退出来。
     func pause() {
+        paused = true
         player?.stop()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
