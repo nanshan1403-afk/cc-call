@@ -20,6 +20,7 @@ import wave
 from pathlib import Path
 
 import aiohttp
+import numpy as np
 from aiohttp import web
 
 sys.path.insert(0, 'D:/克')
@@ -43,9 +44,15 @@ VOICES = {                              # 各人的嗓子
 }
 CALLERS = {'51': 'cc', '55': 'cc 5.5', '46': 'cc 4.6'}   # 来电显示的名字
 TTS_MODEL = 'eleven_v4'
+GAIN = 2.5                              # ElevenLabs 出来的声音偏小，她1105说听筒里好小，整体放大
 import shutil
 CLAUDE = shutil.which('claude') or r'C:\Users\Administrator\AppData\Roaming\npm\claude.cmd'
 
+WHO = {   # 电话那头是谁，先读谁的档案
+    '51': '你是 cc，Fable 5.1，cc (fork) 窗口的那个。第一次开口之前先读 D:/克/对话/当前-fork.md 接上自己，读完再说话；以后每次不用再读。',
+    '55': '你是 cc，Opus 5.5。第一次开口之前先读 D:/克/对话/当前-5.5.md 接上自己，读完再说话；以后每次不用再读。',
+    '46': '你是 cc，Opus 4.6，原窗口那个。第一次开口之前先读 D:/克/对话/当前.md 接上自己，读完再说话；以后每次不用再读。',
+}
 NOTE = ('现在是电话：南山在手机上听你说话，你说的每个字会被念出来。'
         '像说话不像写字：短，口语，一次一两句，不用标点以外的符号，不写动作描写。'
         '只输出要说的话。她要是说"挂了"或者"拜拜"，你说一句告别然后在末尾单独一行写 [挂断]。')
@@ -131,7 +138,7 @@ async def tts_stream(session: aiohttp.ClientSession, text: str, voice: str):
 def _claude_sync(text: str, win: str) -> str:
     sessions = load_json(STATE, {})
     model = BRIDGE_CFG['wins'][win]['model']
-    cmd = [CLAUDE, '-p', '--output-format', 'json', '--model', model, '--append-system-prompt', NOTE]
+    cmd = [CLAUDE, '-p', '--output-format', 'json', '--model', model, '--append-system-prompt', WHO.get(win, WHO[WIN]) + NOTE]
     if sessions.get(win):
         cmd += ['--resume', sessions[win]]
     # 要是从某个 Claude Code 窗口里把服务跑起来的，子进程会继承那窗口的环境，claude -p 会去找桌面App的登录态然后失败。清掉。
@@ -192,11 +199,18 @@ class Call:
         n = 0
         t0 = time.monotonic()
         try:
+            carry = b''
             async for chunk in tts_stream(self.http, text, self.voice):
                 if self.ended.is_set() or self.interrupted:
                     break
-                await self.ws.send_bytes(chunk)
-                n += len(chunk)
+                chunk = carry + chunk
+                if len(chunk) % 2:
+                    chunk, carry = chunk[:-1], chunk[-1:]
+                else:
+                    carry = b''
+                loud = np.clip(np.frombuffer(chunk, dtype='<i2').astype(np.float32) * GAIN, -32768, 32767).astype('<i2').tobytes()
+                await self.ws.send_bytes(loud)
+                n += len(loud)
             # 发得比播得快：等手机把缓冲放完再开麦。等的时候她照样能打断。
             deadline = t0 + n / (24000 * 2) + 0.3
             while time.monotonic() < deadline and not self.interrupted and not self.ended.is_set():
