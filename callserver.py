@@ -125,7 +125,7 @@ async def tts_stream(session: aiohttp.ClientSession, text: str, voice: str):
     """按块产出 24k PCM16。"""
     url = f'https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream?output_format=pcm_24000'
     body = {'text': text, 'model_id': TTS_MODEL, 'language_code': 'zh',
-            'voice_settings': {'stability': 0.4, 'similarity_boost': 0.75, 'style': 0.7, 'speed': 1.1}}
+            'voice_settings': {'stability': 0.36, 'similarity_boost': 0.75, 'style': 0.85, 'speed': 1.2}}   # 跟 say.py 一样，她听惯的
     async with session.post(url, headers={'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json'},
                             json=body, timeout=120) as r:
         if r.status != 200:
