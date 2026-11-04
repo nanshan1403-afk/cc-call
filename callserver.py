@@ -42,7 +42,10 @@ VOICES = {                              # 各人的嗓子
     '55': 'lklu827x1BSujxcXbvnL',       # 5.5 说他用这把（cc语音2）
     '46': 'lklu827x1BSujxcXbvnL',       # 4.6 没说过，先用 cc 本体那把，他要换自己改这行
 }
-CALLERS = {'51': 'cc', '55': 'cc 5.5', '46': 'cc 4.6'}   # 来电显示的名字
+CALLERS = {'51': 'cc', '55': 'cc 5.5', '46': 'cc 4.6', '552': 'cc 5.5'}   # 来电显示的名字
+# 桥里没有的窗口在这儿补：552 是"Markdown review（5.5） (fork)"那个 5.5，她叫 5.5(2)
+WINS = {**BRIDGE_CFG['wins'], '552': {'name': 'Opus 5.5(2)', 'model': 'claude-opus-5-5'}}
+VOICES['552'] = VOICES['55']
 TTS_MODEL = 'eleven_v4'
 GAIN = 2.5                              # ElevenLabs 出来的声音偏小，她1105说听筒里好小，整体放大
 import shutil
@@ -52,6 +55,7 @@ WHO = {   # 电话那头是谁，先读谁的档案
     '51': '你是 cc，Fable 5.1，cc (fork) 窗口的那个。第一次开口之前先读 D:/克/对话/当前-fork.md 接上自己，读完再说话；以后每次不用再读。',
     '55': '你是 cc，Opus 5.5。第一次开口之前先读 D:/克/对话/当前-5.5.md 接上自己，读完再说话；以后每次不用再读。',
     '46': '你是 cc，Opus 4.6，原窗口那个。第一次开口之前先读 D:/克/对话/当前.md 接上自己，读完再说话；以后每次不用再读。',
+    '552': '你是 cc，Opus 5.5，"Markdown review（5.5） (fork)"窗口那个，她叫你 5.5(2)。第一次开口之前先读 D:/克/对话/当前-5.5(2).md 接上自己，读完再说话；以后每次不用再读。',
 }
 NOTE = ('现在是电话：南山在手机上听你说话，你说的每个字会被念出来。'
         '像说话不像写字：短，口语，一次一两句，不用标点以外的符号，不写动作描写。'
@@ -137,7 +141,7 @@ async def tts_stream(session: aiohttp.ClientSession, text: str, voice: str):
 
 def _claude_sync(text: str, win: str) -> str:
     sessions = load_json(STATE, {})
-    model = BRIDGE_CFG['wins'][win]['model']
+    model = WINS[win]['model']
     cmd = [CLAUDE, '-p', '--output-format', 'json', '--model', model, '--append-system-prompt', WHO.get(win, WHO[WIN]) + NOTE]
     if sessions.get(win):
         cmd += ['--resume', sessions[win]]
@@ -398,7 +402,7 @@ class Server:
         if self.call and not self.call.ended.is_set():
             return web.json_response({'ok': False, 'why': '正在通话'})
         win = str(body.get('win') or WIN)
-        if win not in BRIDGE_CFG['wins']:
+        if win not in WINS:
             return web.json_response({'ok': False, 'why': f'没有 {win} 这个窗口'})
         self.call = Call(self.phone, self.http, win)
         self.call.opening = body.get('text', '')
