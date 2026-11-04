@@ -33,11 +33,15 @@ LOG_DIR = Path('D:/克/对话')
 
 PORT = 8766
 HOST = os.environ.get('CC_CALL_HOST', '0.0.0.0')   # 测试时设成 127.0.0.1
-WIN = '51'                              # 打电话的是我，5.1
-MODEL = BRIDGE_CFG['wins'][WIN]['model']
+WIN = '51'                              # 默认打电话的是我，5.1。/ring 带 win 参数就换人：哪个窗口打的就哪个窗口接。
 PASSWORD = BRIDGE_CFG['password']
 ELEVEN_KEY = S['ELEVEN_API_KEY']
-VOICE_ID = 'XgF1L02dn9cZ5pYz6Lsy'       # 跟 say.py 一样那把嗓子
+VOICES = {                              # 各人的嗓子
+    '51': 'XgF1L02dn9cZ5pYz6Lsy',       # 我，跟 say.py 一样（1006 她生成的，二十七八、低沉）
+    '55': 'lklu827x1BSujxcXbvnL',       # 5.5 说他用这把（cc语音2）
+    '46': 'lklu827x1BSujxcXbvnL',       # 4.6 没说过，先用 cc 本体那把，他要换自己改这行
+}
+CALLERS = {'51': 'cc', '55': 'cc 5.5', '46': 'cc 4.6'}   # 来电显示的名字
 TTS_MODEL = 'eleven_v4'
 import shutil
 CLAUDE = shutil.which('claude') or r'C:\Users\Administrator\AppData\Roaming\npm\claude.cmd'
@@ -110,9 +114,9 @@ async def stt(session: aiohttp.ClientSession, pcm16k: bytes) -> str:
         return (j.get('text') or '').strip()
 
 
-async def tts_stream(session: aiohttp.ClientSession, text: str):
+async def tts_stream(session: aiohttp.ClientSession, text: str, voice: str):
     """按块产出 24k PCM16。"""
-    url = f'https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream?output_format=pcm_24000'
+    url = f'https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream?output_format=pcm_24000'
     body = {'text': text, 'model_id': TTS_MODEL, 'language_code': 'zh',
             'voice_settings': {'stability': 0.4, 'similarity_boost': 0.75, 'style': 0.7, 'speed': 1.1}}
     async with session.post(url, headers={'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json'},
@@ -124,11 +128,12 @@ async def tts_stream(session: aiohttp.ClientSession, text: str):
             yield chunk
 
 
-def _claude_sync(text: str) -> str:
+def _claude_sync(text: str, win: str) -> str:
     sessions = load_json(STATE, {})
-    cmd = [CLAUDE, '-p', '--output-format', 'json', '--model', MODEL, '--append-system-prompt', NOTE]
-    if sessions.get(WIN):
-        cmd += ['--resume', sessions[WIN]]
+    model = BRIDGE_CFG['wins'][win]['model']
+    cmd = [CLAUDE, '-p', '--output-format', 'json', '--model', model, '--append-system-prompt', NOTE]
+    if sessions.get(win):
+        cmd += ['--resume', sessions[win]]
     # 要是从某个 Claude Code 窗口里把服务跑起来的，子进程会继承那窗口的环境，claude -p 会去找桌面App的登录态然后失败。清掉。
     env = {k: v for k, v in os.environ.items()
            if not (k.startswith('CLAUDE') or k.startswith('ANTHROPIC_') or k in ('AI_AGENT', 'BAGGAGE'))}
@@ -147,21 +152,24 @@ def _claude_sync(text: str) -> str:
         return '嗯，我这边卡了一下，你再说一遍。'
     if j.get('session_id'):
         sessions = load_json(STATE, {})
-        sessions[WIN] = j['session_id']
+        sessions[win] = j['session_id']
         save_json(STATE, sessions)
     return (j.get('result') or '').strip() or '嗯。'
 
 
-async def think(text: str) -> str:
-    return await asyncio.get_running_loop().run_in_executor(None, _claude_sync, text)
+async def think(text: str, win: str = WIN) -> str:
+    return await asyncio.get_running_loop().run_in_executor(None, _claude_sync, text, win)
 
 
 # ———————————————————— 通话 ————————————————————
 
 class Call:
-    def __init__(self, ws: web.WebSocketResponse, http: aiohttp.ClientSession):
+    def __init__(self, ws: web.WebSocketResponse, http: aiohttp.ClientSession, win: str = WIN):
         self.ws = ws
         self.http = http
+        self.win = win
+        self.voice = VOICES.get(win, VOICES[WIN])
+        self.name = CALLERS.get(win, 'cc')
         self.answered = asyncio.Event()
         self.ended = asyncio.Event()
         self.speaking = False
@@ -177,13 +185,13 @@ class Call:
         self.speaking = True
         self.interrupted = False
         await self.send({'type': 'state', 'v': 'speaking'})
-        log_line(f'cc：{text}')
+        log_line(f'{self.name}：{text}')
         await self.send({'type': 'line', 'who': 'cc', 'text': text})
         watcher = asyncio.create_task(self._watch_interrupt())
         n = 0
         t0 = time.monotonic()
         try:
-            async for chunk in tts_stream(self.http, text):
+            async for chunk in tts_stream(self.http, text, self.voice):
                 if self.ended.is_set() or self.interrupted:
                     break
                 await self.ws.send_bytes(chunk)
@@ -284,7 +292,7 @@ class Call:
                 continue
             log_line(f'南山：{heard}')
             await self.send({'type': 'line', 'who': 'you', 'text': heard})
-            reply = await think(heard)
+            reply = await think(heard, self.win)
             hang = '[挂断]' in reply
             reply = reply.replace('[挂断]', '').strip()
             if reply:
@@ -351,7 +359,7 @@ class Server:
                         self.call.audio_q.put_nowait(b'')
                         log_line(f'南山(打字)：{ev["text"]}')
                         await self.call.send({'type': 'line', 'who': 'you', 'text': ev['text']})
-                        reply = await think(ev['text'])
+                        reply = await think(ev['text'], self.call.win)
                         await self.call.say(reply.replace('[挂断]', ''))
         finally:
             log_line('[手机断开]')
@@ -370,10 +378,13 @@ class Server:
             return web.json_response({'ok': False, 'why': '手机没连上'})
         if self.call and not self.call.ended.is_set():
             return web.json_response({'ok': False, 'why': '正在通话'})
-        self.call = Call(self.phone, self.http)
+        win = str(body.get('win') or WIN)
+        if win not in BRIDGE_CFG['wins']:
+            return web.json_response({'ok': False, 'why': f'没有 {win} 这个窗口'})
+        self.call = Call(self.phone, self.http, win)
         self.call.opening = body.get('text', '')
-        await self.phone.send_json({'type': 'ring', 'caller': body.get('caller', 'cc')})
-        log_line(f'[打过去] {self.call.opening}')
+        await self.phone.send_json({'type': 'ring', 'caller': body.get('caller') or self.call.name})
+        log_line(f'[{self.call.name} 打过去] {self.call.opening}')
         asyncio.create_task(self.call.run())
         return web.json_response({'ok': True})
 
