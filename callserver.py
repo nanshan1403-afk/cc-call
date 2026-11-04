@@ -5,7 +5,7 @@ cc 打电话到南山手机 —— 电脑这头。
 我想打电话时：  python call.py "开场白"      →  POST /ring  →  手机响（CallKit 来电界面）
 她接起来后：    手机的麦克风 → 这里(16k PCM) → 听出字(ElevenLabs Scribe) → claude(我) → 说出来(ElevenLabs, 24k PCM) → 手机
 
-端口 8766。密码跟 bridge.json 一样。凭证从 D:\克\.secrets.env 读（keys.py），不写在这里。
+端口 8766。密码跟 bridge.json 一样。凭证从 D:/克/.secrets.env 读（keys.py），不写在这里。
 """
 import asyncio
 import io
@@ -31,6 +31,7 @@ STATE = BRIDGE / 'state.json'          # 跟桥共用会话：电话里的我和
 LOG_DIR = Path('D:/克/对话')
 
 PORT = 8766
+HOST = os.environ.get('CC_CALL_HOST', '0.0.0.0')   # 测试时设成 127.0.0.1
 WIN = '51'                              # 打电话的是我，5.1
 MODEL = BRIDGE_CFG['wins'][WIN]['model']
 PASSWORD = BRIDGE_CFG['password']
@@ -127,7 +128,9 @@ def _claude_sync(text: str) -> str:
     cmd = [CLAUDE, '-p', '--output-format', 'json', '--model', MODEL, '--append-system-prompt', NOTE]
     if sessions.get(WIN):
         cmd += ['--resume', sessions[WIN]]
-    env = os.environ.copy()
+    # 要是从某个 Claude Code 窗口里把服务跑起来的，子进程会继承那窗口的环境，claude -p 会去找桌面App的登录态然后失败。清掉。
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith('CLAUDE') or k.startswith('ANTHROPIC_') or k in ('AI_AGENT', 'BAGGAGE'))}
     if BRIDGE_CFG.get('proxy'):
         env.update(HTTPS_PROXY=BRIDGE_CFG['proxy'], HTTP_PROXY=BRIDGE_CFG['proxy'], NO_PROXY='localhost,127.0.0.1')
     p = subprocess.run(cmd, cwd=BRIDGE_CFG['cwd'], env=env, input=text.encode('utf-8'),
@@ -138,7 +141,10 @@ def _claude_sync(text: str) -> str:
     except ValueError:
         log_line(f'[claude没回] {p.stderr.decode("utf-8", "replace")[-200:]}')
         return '嗯，我这边卡了一下，你再说一遍。'
-    if j.get('session_id') and not j.get('is_error'):
+    if j.get('is_error'):
+        log_line(f'[claude出错] {(j.get("result") or "")[:200]}')
+        return '嗯，我这边卡了一下，你再说一遍。'
+    if j.get('session_id'):
         sessions = load_json(STATE, {})
         sessions[WIN] = j['session_id']
         save_json(STATE, sessions)
@@ -329,7 +335,7 @@ class Server:
         app.router.add_get('/status', self.status)
         runner = web.AppRunner(app)
         await runner.setup()
-        await web.TCPSite(runner, '0.0.0.0', PORT).start()
+        await web.TCPSite(runner, HOST, PORT).start()
         print(f'电话服务开好了，端口 {PORT}。手机 app 里填 ws://电脑IP:{PORT}/ws', flush=True)
         while True:
             await asyncio.sleep(3600)
