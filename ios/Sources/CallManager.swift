@@ -16,6 +16,7 @@ final class CallManager: NSObject, ObservableObject {
     private var session: URLSession!
     private var reconnectDelay: TimeInterval = 2
     private var generation = 0
+    private var pingTimer: Timer?
 
     private let ring = RingService()
     private let audio = AudioIO()
@@ -25,12 +26,19 @@ final class CallManager: NSObject, ObservableObject {
         super.init()
         let cfg = URLSessionConfiguration.default
         cfg.waitsForConnectivity = true
+        cfg.timeoutIntervalForRequest = 600
+        cfg.timeoutIntervalForResource = 86400 * 7
         session = URLSession(configuration: cfg)
 
+        ring.onBeforeAnswer = { [weak self] in self?.keepAlive.pause() }
         ring.onAnswer = { [weak self] in self?.answered() }
         ring.onEnd = { [weak self] in self?.endedByUser() }
         ring.onAudioActivated = { [weak self] in self?.audio.start() }
-        ring.onAudioDeactivated = { [weak self] in self?.audio.stop() }
+        ring.onAudioDeactivated = { [weak self] in
+            guard let self else { return }
+            self.audio.stop()
+            if self.wantConnected { self.keepAlive.resume() }   // 通话完把无声保活放回去，不然后台很快被挂起
+        }
         audio.onMic = { [weak self] data in self?.send(data: data) }
 
         wantConnected = UserDefaults.standard.bool(forKey: "wantConnected")
@@ -66,14 +74,29 @@ final class CallManager: NSObject, ObservableObject {
         sendJSON(["type": "hello", "pw": password])
         set(conn: "连接中…")
         receive(gen: gen)
+        startPing()
     }
 
     private func disconnect() {
         generation += 1
+        stopPing()
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         keepAlive.stop()
         set(conn: "没连")
+    }
+
+    private func startPing() {
+        stopPing()
+        DispatchQueue.main.async {
+            self.pingTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+                self?.task?.sendPing { _ in }
+            }
+        }
+    }
+
+    private func stopPing() {
+        DispatchQueue.main.async { self.pingTimer?.invalidate(); self.pingTimer = nil }
     }
 
     private func receive(gen: Int) {
@@ -82,6 +105,11 @@ final class CallManager: NSObject, ObservableObject {
             switch result {
             case .failure(let e):
                 self.set(conn: "断了：\(e.localizedDescription)")
+                if self.inCall {
+                    self.ring.failCall()
+                    DispatchQueue.main.async { self.inCall = false }
+                    self.set(call: "断线")
+                }
                 self.scheduleReconnect()
             case .success(let msg):
                 switch msg {
@@ -121,6 +149,8 @@ final class CallManager: NSObject, ObservableObject {
             ring.endCallFromRemote()
             DispatchQueue.main.async { self.inCall = false }
             set(call: "挂了")
+        case "flush":
+            audio.flush()
         case "state":
             let v = ev["v"] as? String ?? ""
             let names = ["speaking": "他在说", "listening": "在听你", "thinking": "他在想"]
@@ -136,6 +166,11 @@ final class CallManager: NSObject, ObservableObject {
         DispatchQueue.main.async { self.inCall = true }
         set(call: "接通")
         sendJSON(["type": "answer"])
+        // 有时 CallKit 不回调 didActivate（session 本来就是激活的），一秒没动静就自己起引擎
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.inCall, !self.audio.isRunning else { return }
+            self.audio.start()
+        }
     }
 
     private func endedByUser() {

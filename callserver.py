@@ -164,6 +164,7 @@ class Call:
         self.answered = asyncio.Event()
         self.ended = asyncio.Event()
         self.speaking = False
+        self.interrupted = False
         self.audio_q: asyncio.Queue[bytes] = asyncio.Queue()
         self.opening = ''
 
@@ -173,20 +174,47 @@ class Call:
 
     async def say(self, text: str):
         self.speaking = True
+        self.interrupted = False
         await self.send({'type': 'state', 'v': 'speaking'})
         log_line(f'cc：{text}')
+        watcher = asyncio.create_task(self._watch_interrupt())
         n = 0
-        async for chunk in tts_stream(self.http, text):
-            if self.ended.is_set():
-                break
-            await self.ws.send_bytes(chunk)
-            n += len(chunk)
-        # 等手机把缓冲放完再开麦，不然会把自己的声音听进去
-        await asyncio.sleep(n / (24000 * 2) * 0.15 + 0.4)
+        t0 = time.monotonic()
+        try:
+            async for chunk in tts_stream(self.http, text):
+                if self.ended.is_set() or self.interrupted:
+                    break
+                await self.ws.send_bytes(chunk)
+                n += len(chunk)
+            # 发得比播得快：等手机把缓冲放完再开麦。等的时候她照样能打断。
+            deadline = t0 + n / (24000 * 2) + 0.3
+            while time.monotonic() < deadline and not self.interrupted and not self.ended.is_set():
+                await asyncio.sleep(0.05)
+        finally:
+            watcher.cancel()
+        if self.interrupted:
+            await self.send({'type': 'flush'})
+            log_line('[她打断了]')
         self.speaking = False
-        while not self.audio_q.empty():
-            self.audio_q.get_nowait()
         await self.send({'type': 'state', 'v': 'listening'})
+
+    async def _watch_interrupt(self):
+        """我说话的时候也听着：她连着开口 240ms 就算打断。门槛比平时高一倍，防回声误触。"""
+        loud = 0
+        keep: list[bytes] = []
+        while True:
+            frame = await self.audio_q.get()
+            if rms(frame) > RMS_START * 2:
+                loud += 1
+                keep.append(frame)
+                if loud >= START_FRAMES * 3:
+                    self.interrupted = True
+                    for f in keep:          # 她开口那几帧还回去，listen 接着用
+                        self.audio_q.put_nowait(f)
+                    return
+            else:
+                loud = 0
+                keep.clear()
 
     async def listen(self) -> bytes:
         """等她说一段话，返回 16k PCM。"""

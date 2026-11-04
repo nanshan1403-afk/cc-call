@@ -3,34 +3,46 @@ import AVFoundation
 /// 麦克风 → 16k PCM16 发给电脑；电脑来的 24k PCM16 → 扬声器/听筒。
 final class AudioIO {
     var onMic: ((Data) -> Void)?
+    private(set) var isRunning = false
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24000, channels: 1, interleaved: false)!
     private let micFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
     private var converter: AVAudioConverter?
-    private var running = false
-    private var pending = Data()
+    private var pending = Data()          // 引擎没起来之前先攒着，起来再播，开头那句不丢
     private let q = DispatchQueue(label: "cc.audio")
+
+    private final class Once { var used = false }
 
     init() {
         engine.attach(player)
     }
 
-    func start() {
-        q.async { self._start() }
-    }
+    func start() { q.async { self._start() } }
+    func stop() { q.async { self._stop() } }
 
-    func stop() {
-        q.async { self._stop() }
+    /// 她打断我的时候：把排队的我的声音清掉。
+    func flush() {
+        q.async {
+            self.pending.removeAll()
+            if self.isRunning {
+                self.player.stop()
+                self.player.play()
+            }
+        }
     }
 
     private func _start() {
-        guard !running else { return }
+        guard !isRunning else { return }
         let input = engine.inputNode
+        // 回声消除：不开的话听筒/外放里我的声音会被麦克风收回去。要在读格式之前开，开完格式会变。
+        try? input.setVoiceProcessingEnabled(true)
         let inFmt = input.outputFormat(forBus: 0)
         guard inFmt.sampleRate > 0 else { return }
-        converter = AVAudioConverter(from: inFmt, to: micFormat)
+        let conv = AVAudioConverter(from: inFmt, to: micFormat)
+        if inFmt.channelCount > 1 { conv?.channelMap = [0] }
+        converter = conv
         engine.connect(player, to: engine.mainMixerNode, format: outFormat)
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buf, _ in
@@ -40,18 +52,19 @@ final class AudioIO {
         do {
             try engine.start()
             player.play()
-            running = true
+            isRunning = true
+            drainPending()
         } catch {
             print("audio engine", error)
         }
     }
 
     private func _stop() {
-        guard running else { return }
+        guard isRunning else { return }
         engine.inputNode.removeTap(onBus: 0)
         player.stop()
         engine.stop()
-        running = false
+        isRunning = false
         pending.removeAll()
     }
 
@@ -60,11 +73,11 @@ final class AudioIO {
         let ratio = micFormat.sampleRate / buf.format.sampleRate
         let cap = AVAudioFrameCount(Double(buf.frameLength) * ratio) + 64
         guard let out = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: cap) else { return }
-        var consumed = false
+        let once = Once()
         var err: NSError?
-        converter.convert(to: out, error: &err) { _, status in
-            if consumed { status.pointee = .noDataNow; return nil }
-            consumed = true
+        _ = converter.convert(to: out, error: &err) { _, status in
+            if once.used { status.pointee = .noDataNow; return nil }
+            once.used = true
             status.pointee = .haveData
             return buf
         }
@@ -74,46 +87,77 @@ final class AudioIO {
 
     func play(pcm24k data: Data) {
         q.async {
-            guard self.running else { return }
             self.pending.append(data)
-            let n = self.pending.count / 2
-            guard n > 0, let buf = AVAudioPCMBuffer(pcmFormat: self.outFormat, frameCapacity: AVAudioFrameCount(n)) else { return }
-            buf.frameLength = AVAudioFrameCount(n)
-            let dst = buf.floatChannelData![0]
-            self.pending.withUnsafeBytes { raw in
-                for i in 0..<n {
-                    let v = raw.loadUnaligned(fromByteOffset: i * 2, as: Int16.self)
-                    dst[i] = Float(Int16(littleEndian: v)) / 32768.0
-                }
-            }
-            self.pending.removeFirst(n * 2)
-            self.player.scheduleBuffer(buf, completionHandler: nil)
-            if !self.player.isPlaying { self.player.play() }
+            if self.isRunning { self.drainPending() }
         }
+    }
+
+    private func drainPending() {
+        let n = pending.count / 2
+        guard n > 0, let buf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: AVAudioFrameCount(n)) else { return }
+        buf.frameLength = AVAudioFrameCount(n)
+        let dst = buf.floatChannelData![0]
+        pending.withUnsafeBytes { raw in
+            for i in 0..<n {
+                let v = raw.loadUnaligned(fromByteOffset: i * 2, as: Int16.self)
+                dst[i] = Float(Int16(littleEndian: v)) / 32768.0
+            }
+        }
+        pending.removeFirst(n * 2)
+        player.scheduleBuffer(buf, completionHandler: nil)
+        if !player.isPlaying { player.play() }
     }
 }
 
 /// 后台不被系统挂起：循环放一段无声。开着"保持连接"的时候一直放。
+/// 免费账号没有 PushKit，App 被划掉就醒不了，这是唯一的保活法。
 final class KeepAlive {
     private var player: AVAudioPlayer?
+    private var wanted = false
+    private var observer: NSObjectProtocol?
 
     func start() {
-        guard player == nil else { return }
+        wanted = true
+        if observer == nil {
+            observer = NotificationCenter.default.addObserver(
+                forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+                // 真电话、Siri、闹钟打断完了，把无声再放起来
+                guard let self, self.wanted,
+                      let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+                self.resume()
+            }
+        }
+        AVAudioSession.sharedInstance().requestRecordPermission { _ in }   // 先把麦克风权限要了，别等到电话里才弹
+        resume()
+    }
+
+    /// 通话结束后 CallKit 会把 session 关掉、category 也留在通话那套；这里全部设回来。
+    func resume() {
+        guard wanted else { return }
         let s = AVAudioSession.sharedInstance()
         try? s.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth])
         try? s.setActive(true)
-        s.requestRecordPermission { _ in }   // 先把麦克风权限要了，别等到电话里才弹
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("silence.wav")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try? KeepAlive.silentWav().write(to: url)
+        if player == nil {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("silence.wav")
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try? KeepAlive.silentWav().write(to: url)
+            }
+            player = try? AVAudioPlayer(contentsOf: url)
+            player?.numberOfLoops = -1
+            player?.volume = 0.01
         }
-        player = try? AVAudioPlayer(contentsOf: url)
-        player?.numberOfLoops = -1
-        player?.volume = 0.01
-        player?.play()
+        if player?.isPlaying != true { player?.play() }
+    }
+
+    /// 接电话前让位：CallKit 要自己激活 session，我们先退出来。
+    func pause() {
+        player?.stop()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     func stop() {
+        wanted = false
         player?.stop()
         player = nil
     }

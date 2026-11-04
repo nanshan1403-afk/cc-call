@@ -40,8 +40,10 @@ struct ContentView: View {
                         }
                     }
                 }
-                Section(footer: Text("开着连接回桌面也行，别从后台划掉。cc 打来会像普通来电一样响，锁屏也能接。")) {
-                    EmptyView()
+                Section {
+                    Text("开着连接回桌面也行，别从后台划掉。cc 打来会像普通来电一样响，锁屏也能接。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("cc")
