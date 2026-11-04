@@ -317,7 +317,8 @@ class Server:
             return ws
         try:
             first = await ws.receive_json(timeout=10)
-        except Exception:
+        except Exception as e:
+            log_line(f'[握手了但没收到 hello {src}] {type(e).__name__}')
             await ws.close()
             return ws
         if first.get('type') != 'hello' or not hmac.compare_digest(str(first.get('pw', '')), PASSWORD):

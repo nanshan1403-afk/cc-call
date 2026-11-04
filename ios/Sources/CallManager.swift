@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// 跟电脑上的 callserver.py 保持一条 WebSocket；来电、接听、挂断、音频都走它。
-final class CallManager: NSObject, ObservableObject {
+final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     static let shared = CallManager()
 
     @Published var connState = "没连"
@@ -30,7 +30,7 @@ final class CallManager: NSObject, ObservableObject {
         cfg.waitsForConnectivity = true
         cfg.timeoutIntervalForRequest = 600
         cfg.timeoutIntervalForResource = 86400 * 7
-        session = URLSession(configuration: cfg)
+        session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
 
         ring.onBeforeAnswer = { [weak self] in self?.keepAlive.pause() }
         ring.onAnswer = { [weak self] in self?.answered() }
@@ -103,10 +103,24 @@ final class CallManager: NSObject, ObservableObject {
         task = t
         t.resume()
         keepAlive.start()
-        sendJSON(["type": "hello", "pw": password])
+        // hello 不在这儿发：握手没完成就 send，经 Cloudflare 那条路会被丢（1105 凌晨查出来的）。等 didOpen 再发。
         set(conn: "连接中…")
         receive(gen: gen)
         startPing()
+    }
+
+    // MARK: - URLSessionWebSocketDelegate
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        guard webSocketTask === task else { return }
+        set(conn: "握手了，报密码…")
+        sendJSON(["type": "hello", "pw": password])
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        guard webSocketTask === task else { return }
+        let why = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        set(conn: "对方关了(\(closeCode.rawValue)) \(why)")
     }
 
     private func disconnect() {
@@ -226,7 +240,9 @@ final class CallManager: NSObject, ObservableObject {
     private func sendJSON(_ obj: [String: Any]) {
         guard let d = try? JSONSerialization.data(withJSONObject: obj),
               let s = String(data: d, encoding: .utf8) else { return }
-        task?.send(.string(s)) { _ in }
+        task?.send(.string(s)) { [weak self] err in
+            if let err { self?.set(conn: "发不出去：\(err.localizedDescription)") }
+        }
     }
 
     private func set(conn: String) { DispatchQueue.main.async { self.connState = conn } }
