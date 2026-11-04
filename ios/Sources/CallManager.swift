@@ -44,18 +44,48 @@ final class CallManager: NSObject, ObservableObject {
         audio.onMic = { [weak self] data in self?.send(data: data) }
 
         wantConnected = UserDefaults.standard.bool(forKey: "wantConnected")
-        if wantConnected,
-           let s = UserDefaults.standard.string(forKey: "serverURL"), let u = URL(string: s) {
-            url = u
-            password = UserDefaults.standard.string(forKey: "password") ?? ""
-            connect()
+        if wantConnected {
+            if let u = Self.normalize(UserDefaults.standard.string(forKey: "serverURL") ?? "") {
+                url = u
+                password = UserDefaults.standard.string(forKey: "password") ?? ""
+                connect()
+            } else {
+                // 存着的地址不对（1105 第一次真机就崩在这：scheme 不是 ws/wss 时 webSocketTask 直接抛 ObjC 异常）
+                wantConnected = false
+                UserDefaults.standard.set(false, forKey: "wantConnected")
+                connState = "地址不对，要以 wss:// 开头"
+            }
         }
     }
 
+    /// 把她手打的地址收拾干净：去空白、全角冒号斜杠换半角、没写 scheme 就补 wss://；不是 ws/wss 或没有 host 就不要。
+    static func normalize(_ raw: String) -> URL? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        s = s.replacingOccurrences(of: "：", with: ":")
+             .replacingOccurrences(of: "／", with: "/")
+             .replacingOccurrences(of: " ", with: "")
+        let low = s.lowercased()
+        if !low.hasPrefix("ws://") && !low.hasPrefix("wss://") {
+            s = "wss://" + s
+        }
+        guard let u = URL(string: s),
+              let scheme = u.scheme?.lowercased(), scheme == "ws" || scheme == "wss",
+              let host = u.host, !host.isEmpty else { return nil }
+        return u
+    }
+
     func setWant(_ on: Bool, url: String, pw: String) {
+        let u = Self.normalize(url)
+        if on && u == nil {
+            wantConnected = false
+            UserDefaults.standard.set(false, forKey: "wantConnected")
+            set(conn: "地址不对，要以 wss:// 开头")
+            return
+        }
         wantConnected = on
         UserDefaults.standard.set(on, forKey: "wantConnected")
-        self.url = URL(string: url)
+        if let u { UserDefaults.standard.set(u.absoluteString, forKey: "serverURL") }
+        self.url = u
         self.password = pw
         if on { reconnectDelay = 2; connect() } else { disconnect() }
     }
