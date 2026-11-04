@@ -3,6 +3,7 @@ import AVFoundation
 /// 麦克风 → 16k PCM16 发给电脑；电脑来的 24k PCM16 → 扬声器/听筒。
 final class AudioIO {
     var onMic: ((Data) -> Void)?
+    var onError: ((String) -> Void)?
     private(set) var isRunning = false
 
     private let engine = AVAudioEngine()
@@ -55,12 +56,20 @@ final class AudioIO {
         engine.prepare()
         do {
             try engine.start()
-            player.play()
-            isRunning = true
-            drainPending()
         } catch {
-            print("audio engine", error)
+            // 多半是 session 没激活（CallKit 没来 didActivate）。自己激活一次再试。
+            let s = AVAudioSession.sharedInstance()
+            try? s.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+            try? s.setActive(true)
+            do { try engine.start() } catch {
+                onError?("音频起不来：\(error.localizedDescription)")
+                return
+            }
         }
+        player.play()
+        isRunning = true
+        onError?(converter == nil ? "只放不收（没麦克风）" : "音频通了")
+        drainPending()
     }
 
     private func _stop() {

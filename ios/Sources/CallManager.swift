@@ -42,6 +42,7 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
             if self.wantConnected { self.keepAlive.resume() }   // 通话完把无声保活放回去，不然后台很快被挂起
         }
         audio.onMic = { [weak self] data in self?.send(data: data) }
+        audio.onError = { [weak self] msg in self?.set(call: msg) }
 
         wantConnected = UserDefaults.standard.bool(forKey: "wantConnected")
         if wantConnected {
@@ -227,6 +228,7 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
         // 有时 CallKit 不回调 didActivate（session 本来就是激活的），一秒没动静就自己起引擎
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self, self.inCall, !self.audio.isRunning else { return }
+            self.set(call: "系统没交音频，自己起")
             self.audio.start()
         }
     }
