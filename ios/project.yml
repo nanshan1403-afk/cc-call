@@ -19,6 +19,7 @@ targets:
         UILaunchScreen: {}
         UIBackgroundModes: [audio, voip]
         NSMicrophoneUsageDescription: cc打电话来的时候要用麦克风听你说话
+        NSLocalNetworkUsageDescription: 要连到家里电脑上的cc
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
