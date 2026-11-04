@@ -176,6 +176,7 @@ class Call:
         self.interrupted = False
         self.audio_q: asyncio.Queue[bytes] = asyncio.Queue()
         self.opening = ''
+        self.frames = 0          # 这通收到她多少帧，0 就是她那头麦克风没通
 
     async def send(self, obj):
         if not self.ws.closed:
@@ -202,6 +203,7 @@ class Call:
                 await asyncio.sleep(0.05)
         finally:
             watcher.cancel()
+        log_line(f'[发了 {n} 字节 ≈ {n / 48000:.1f} 秒]')
         if self.interrupted:
             await self.send({'type': 'flush'})
             log_line('[她打断了]')
@@ -300,7 +302,7 @@ class Call:
             if hang:
                 break
         await self.send({'type': 'hangup'})
-        log_line('[挂断]')
+        log_line(f'[挂断] 这通收到她 {self.frames} 帧')
 
 
 class Server:
@@ -345,6 +347,9 @@ class Server:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
                     if self.call and not self.call.ended.is_set():
+                        self.call.frames += 1
+                        if self.call.frames == 1:
+                            log_line(f'[收到她那头第一帧 {len(msg.data)} 字节]')
                         self.call.audio_q.put_nowait(msg.data)
                 elif msg.type == aiohttp.WSMsgType.TEXT:
                     ev = json.loads(msg.data)
