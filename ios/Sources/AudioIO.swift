@@ -81,8 +81,10 @@ final class AudioIO {
             buf.frameLength = AVAudioFrameCount(n)
             let dst = buf.floatChannelData![0]
             self.pending.withUnsafeBytes { raw in
-                let src = raw.bindMemory(to: Int16.self)
-                for i in 0..<n { dst[i] = Float(Int16(littleEndian: src[i])) / 32768.0 }
+                for i in 0..<n {
+                    let v = raw.loadUnaligned(fromByteOffset: i * 2, as: Int16.self)
+                    dst[i] = Float(Int16(littleEndian: v)) / 32768.0
+                }
             }
             self.pending.removeFirst(n * 2)
             self.player.scheduleBuffer(buf, completionHandler: nil)
@@ -100,6 +102,7 @@ final class KeepAlive {
         let s = AVAudioSession.sharedInstance()
         try? s.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth])
         try? s.setActive(true)
+        s.requestRecordPermission { _ in }   // 先把麦克风权限要了，别等到电话里才弹
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("silence.wav")
         if !FileManager.default.fileExists(atPath: url.path) {
             try? KeepAlive.silentWav().write(to: url)

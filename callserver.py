@@ -229,6 +229,9 @@ class Call:
             log_line('[没接]')
             await self.send({'type': 'cancel'})
             return
+        if self.ended.is_set():
+            log_line('[她没接，挂了]')
+            return
         log_line('[接通]')
         await self.say(self.opening or '喂，是我。')
         quiet_rounds = 0
