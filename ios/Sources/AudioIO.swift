@@ -39,15 +39,19 @@ final class AudioIO {
         // 回声消除：不开的话听筒/外放里我的声音会被麦克风收回去。要在读格式之前开，开完格式会变。
         try? input.setVoiceProcessingEnabled(true)
         let inFmt = input.outputFormat(forBus: 0)
-        guard inFmt.sampleRate > 0 else { return }
-        let conv = AVAudioConverter(from: inFmt, to: micFormat)
-        if inFmt.channelCount > 1 { conv?.channelMap = [0] }
-        converter = conv
-        engine.connect(player, to: engine.mainMixerNode, format: outFormat)
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buf, _ in
-            self?.convertAndSend(buf)
+        // 麦克风没权限时 inFmt 是 0Hz/0 声道：那就只放不收，至少她能听见我（1105 第一通两边都哑，怀疑是这个）
+        if inFmt.sampleRate > 0, inFmt.channelCount > 0, let conv = AVAudioConverter(from: inFmt, to: micFormat) {
+            if inFmt.channelCount > 1 { conv.channelMap = [0] }
+            converter = conv
+            input.removeTap(onBus: 0)
+            input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buf, _ in
+                self?.convertAndSend(buf)
+            }
+        } else {
+            converter = nil
+            print("麦克风不可用，只放不收")
         }
+        engine.connect(player, to: engine.mainMixerNode, format: outFormat)
         engine.prepare()
         do {
             try engine.start()
@@ -61,7 +65,7 @@ final class AudioIO {
 
     private func _stop() {
         guard isRunning else { return }
-        engine.inputNode.removeTap(onBus: 0)
+        if converter != nil { engine.inputNode.removeTap(onBus: 0) }
         player.stop()
         engine.stop()
         isRunning = false
