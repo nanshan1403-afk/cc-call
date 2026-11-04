@@ -64,7 +64,11 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
         s = s.replacingOccurrences(of: "：", with: ":")
              .replacingOccurrences(of: "／", with: "/")
              .replacingOccurrences(of: " ", with: "")
-        let low = s.lowercased()
+        // 她打成 https://… 或 http://… 的，换成 wss/ws；什么都没写的补 wss://
+        var low = s.lowercased()
+        if low.hasPrefix("https://") { s = "wss://" + s.dropFirst(8) }
+        else if low.hasPrefix("http://") { s = "ws://" + s.dropFirst(7) }
+        low = s.lowercased()
         if !low.hasPrefix("ws://") && !low.hasPrefix("wss://") {
             s = "wss://" + s
         }
