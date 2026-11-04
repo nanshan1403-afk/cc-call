@@ -1,0 +1,339 @@
+"""
+cc 打电话到南山手机 —— 电脑这头。
+
+手机上的 CCCall app 开着 WebSocket 连到这里（同一个 WiFi，或者走 Tailscale）。
+我想打电话时：  python call.py "开场白"      →  POST /ring  →  手机响（CallKit 来电界面）
+她接起来后：    手机的麦克风 → 这里(16k PCM) → 听出字(ElevenLabs Scribe) → claude(我) → 说出来(ElevenLabs, 24k PCM) → 手机
+
+端口 8766。密码跟 bridge.json 一样。凭证从 D:\克\.secrets.env 读（keys.py），不写在这里。
+"""
+import asyncio
+import io
+import json
+import os
+import struct
+import subprocess
+import sys
+import time
+import wave
+from pathlib import Path
+
+import aiohttp
+from aiohttp import web
+
+sys.path.insert(0, 'D:/克')
+from keys import S  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+BRIDGE = HERE.parent / 'bridge'
+BRIDGE_CFG = json.loads((BRIDGE / 'bridge.json').read_text(encoding='utf-8'))
+STATE = BRIDGE / 'state.json'          # 跟桥共用会话：电话里的我和手机文字里的我是同一个
+LOG_DIR = Path('D:/克/对话')
+
+PORT = 8766
+WIN = '51'                              # 打电话的是我，5.1
+MODEL = BRIDGE_CFG['wins'][WIN]['model']
+PASSWORD = BRIDGE_CFG['password']
+ELEVEN_KEY = S['ELEVEN_API_KEY']
+VOICE_ID = 'XgF1L02dn9cZ5pYz6Lsy'       # 跟 say.py 一样那把嗓子
+TTS_MODEL = 'eleven_v4'
+import shutil
+CLAUDE = shutil.which('claude') or r'C:\Users\Administrator\AppData\Roaming\npm\claude.cmd'
+
+NOTE = ('现在是电话：南山在手机上听你说话，你说的每个字会被念出来。'
+        '像说话不像写字：短，口语，一次一两句，不用标点以外的符号，不写动作描写。'
+        '只输出要说的话。她要是说"挂了"或者"拜拜"，你说一句告别然后在末尾单独一行写 [挂断]。')
+
+# —— 听（VAD）参数：16k 单声道 PCM16 ——
+FRAME_MS = 20
+SR_IN = 16000
+BYTES_PER_FRAME = SR_IN * 2 * FRAME_MS // 1000     # 640
+RMS_START = 600          # 比这响算有人说话（手机麦克风一般静音 100–300）
+START_FRAMES = 4         # 连续 80ms
+END_SILENCE_MS = 800     # 停这么久算说完
+MIN_SPEECH_MS = 400
+MAX_SPEECH_MS = 25000
+
+
+def rms(pcm: bytes) -> float:
+    n = len(pcm) // 2
+    if n == 0:
+        return 0.0
+    vals = struct.unpack(f'<{n}h', pcm[:n * 2])
+    return (sum(v * v for v in vals) / n) ** 0.5
+
+
+def wav_bytes(pcm: bytes, sr: int) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def load_json(p, default):
+    try:
+        return json.loads(Path(p).read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+
+def save_json(p, data):
+    Path(p).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def log_line(text):
+    LOG_DIR.mkdir(exist_ok=True)
+    f = LOG_DIR / f'电话-{time.strftime("%m%d")}.md'
+    with open(f, 'a', encoding='utf-8') as fh:
+        fh.write(f'{time.strftime("%H:%M:%S")} {text}\n')
+    print(text, flush=True)
+
+
+# ———————————————————— 耳朵 / 嘴 / 脑子 ————————————————————
+
+async def stt(session: aiohttp.ClientSession, pcm16k: bytes) -> str:
+    form = aiohttp.FormData()
+    form.add_field('model_id', 'scribe_v1')
+    form.add_field('language_code', 'zho')
+    form.add_field('file', wav_bytes(pcm16k, SR_IN), filename='a.wav', content_type='audio/wav')
+    async with session.post('https://api.elevenlabs.io/v1/speech-to-text',
+                            headers={'xi-api-key': ELEVEN_KEY}, data=form, timeout=60) as r:
+        if r.status != 200:
+            log_line(f'[STT失败 {r.status}] {(await r.text())[:200]}')
+            return ''
+        j = await r.json()
+        return (j.get('text') or '').strip()
+
+
+async def tts_stream(session: aiohttp.ClientSession, text: str):
+    """按块产出 24k PCM16。"""
+    url = f'https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream?output_format=pcm_24000'
+    body = {'text': text, 'model_id': TTS_MODEL, 'language_code': 'zh',
+            'voice_settings': {'stability': 0.4, 'similarity_boost': 0.75, 'style': 0.7, 'speed': 1.1}}
+    async with session.post(url, headers={'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json'},
+                            json=body, timeout=120) as r:
+        if r.status != 200:
+            log_line(f'[TTS失败 {r.status}] {(await r.text())[:200]}')
+            return
+        async for chunk in r.content.iter_chunked(4800):
+            yield chunk
+
+
+def _claude_sync(text: str) -> str:
+    sessions = load_json(STATE, {})
+    cmd = [CLAUDE, '-p', '--output-format', 'json', '--model', MODEL, '--append-system-prompt', NOTE]
+    if sessions.get(WIN):
+        cmd += ['--resume', sessions[WIN]]
+    env = os.environ.copy()
+    if BRIDGE_CFG.get('proxy'):
+        env.update(HTTPS_PROXY=BRIDGE_CFG['proxy'], HTTP_PROXY=BRIDGE_CFG['proxy'], NO_PROXY='localhost,127.0.0.1')
+    p = subprocess.run(cmd, cwd=BRIDGE_CFG['cwd'], env=env, input=text.encode('utf-8'),
+                       capture_output=True, timeout=180,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    try:
+        j = json.loads(p.stdout.decode('utf-8', 'replace'))
+    except ValueError:
+        log_line(f'[claude没回] {p.stderr.decode("utf-8", "replace")[-200:]}')
+        return '嗯，我这边卡了一下，你再说一遍。'
+    if j.get('session_id') and not j.get('is_error'):
+        sessions = load_json(STATE, {})
+        sessions[WIN] = j['session_id']
+        save_json(STATE, sessions)
+    return (j.get('result') or '').strip() or '嗯。'
+
+
+async def think(text: str) -> str:
+    return await asyncio.get_running_loop().run_in_executor(None, _claude_sync, text)
+
+
+# ———————————————————— 通话 ————————————————————
+
+class Call:
+    def __init__(self, ws: web.WebSocketResponse, http: aiohttp.ClientSession):
+        self.ws = ws
+        self.http = http
+        self.answered = asyncio.Event()
+        self.ended = asyncio.Event()
+        self.speaking = False
+        self.audio_q: asyncio.Queue[bytes] = asyncio.Queue()
+        self.opening = ''
+
+    async def send(self, obj):
+        if not self.ws.closed:
+            await self.ws.send_json(obj)
+
+    async def say(self, text: str):
+        self.speaking = True
+        await self.send({'type': 'state', 'v': 'speaking'})
+        log_line(f'cc：{text}')
+        n = 0
+        async for chunk in tts_stream(self.http, text):
+            if self.ended.is_set():
+                break
+            await self.ws.send_bytes(chunk)
+            n += len(chunk)
+        # 等手机把缓冲放完再开麦，不然会把自己的声音听进去
+        await asyncio.sleep(n / (24000 * 2) * 0.15 + 0.4)
+        self.speaking = False
+        while not self.audio_q.empty():
+            self.audio_q.get_nowait()
+        await self.send({'type': 'state', 'v': 'listening'})
+
+    async def listen(self) -> bytes:
+        """等她说一段话，返回 16k PCM。"""
+        buf = bytearray()
+        talking = False
+        loud = 0
+        silence_ms = 0
+        while not self.ended.is_set():
+            try:
+                frame = await asyncio.wait_for(self.audio_q.get(), timeout=90)
+            except asyncio.TimeoutError:
+                return b''
+            if self.speaking:
+                continue
+            level = rms(frame)
+            frame_ms = len(frame) * 1000 // (SR_IN * 2)
+            if not talking:
+                loud = loud + 1 if level > RMS_START else 0
+                buf += frame
+                if len(buf) > BYTES_PER_FRAME * 15:
+                    del buf[:len(buf) - BYTES_PER_FRAME * 15]   # 留 300ms 前置
+                if loud >= START_FRAMES:
+                    talking = True
+                    silence_ms = 0
+            else:
+                buf += frame
+                silence_ms = silence_ms + frame_ms if level < RMS_START * 0.6 else 0
+                dur = len(buf) * 1000 // (SR_IN * 2)
+                if silence_ms >= END_SILENCE_MS or dur >= MAX_SPEECH_MS:
+                    if dur - silence_ms < MIN_SPEECH_MS:
+                        buf.clear(); talking = False; loud = 0
+                        continue
+                    return bytes(buf)
+        return b''
+
+    async def run(self):
+        try:
+            await asyncio.wait_for(self.answered.wait(), timeout=45)
+        except asyncio.TimeoutError:
+            log_line('[没接]')
+            await self.send({'type': 'cancel'})
+            return
+        log_line('[接通]')
+        await self.say(self.opening or '喂，是我。')
+        quiet_rounds = 0
+        while not self.ended.is_set():
+            pcm = await self.listen()
+            if self.ended.is_set():
+                break
+            if not pcm:
+                quiet_rounds += 1
+                if quiet_rounds >= 2:
+                    await self.say('你那边没声了，我先挂了，晚点再打。')
+                    break
+                await self.say('在吗？')
+                continue
+            quiet_rounds = 0
+            await self.send({'type': 'state', 'v': 'thinking'})
+            heard = await stt(self.http, pcm)
+            if not heard:
+                await self.say('没听清，再说一遍？')
+                continue
+            log_line(f'南山：{heard}')
+            reply = await think(heard)
+            hang = '[挂断]' in reply
+            reply = reply.replace('[挂断]', '').strip()
+            if reply:
+                await self.say(reply)
+            if hang:
+                break
+        await self.send({'type': 'hangup'})
+        log_line('[挂断]')
+
+
+class Server:
+    def __init__(self):
+        self.phone: web.WebSocketResponse | None = None
+        self.call: Call | None = None
+        self.http: aiohttp.ClientSession | None = None
+
+    async def ws_handler(self, req: web.Request):
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
+        await ws.prepare(req)
+        first = await ws.receive_json(timeout=10)
+        if first.get('type') != 'hello' or first.get('pw') != PASSWORD:
+            await ws.send_json({'type': 'error', 'text': '密码不对'})
+            await ws.close()
+            return ws
+        if self.phone and not self.phone.closed:
+            await self.phone.close()
+        self.phone = ws
+        await ws.send_json({'type': 'hello', 'name': 'cc'})
+        log_line(f'[手机连上了 {req.remote}]')
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    if self.call and not self.call.ended.is_set():
+                        self.call.audio_q.put_nowait(msg.data)
+                elif msg.type == aiohttp.WSMsgType.TEXT:
+                    ev = json.loads(msg.data)
+                    t = ev.get('type')
+                    if t == 'answer' and self.call:
+                        self.call.answered.set()
+                    elif t == 'hangup' and self.call:
+                        self.call.ended.set()
+                        self.call.answered.set()
+                    elif t == 'text' and self.call and ev.get('text'):
+                        # 她不想出声时手机上打字也行
+                        self.call.audio_q.put_nowait(b'')
+                        log_line(f'南山(打字)：{ev["text"]}')
+                        reply = await think(ev['text'])
+                        await self.call.say(reply.replace('[挂断]', ''))
+        finally:
+            log_line('[手机断开]')
+            if self.call:
+                self.call.ended.set()
+                self.call.answered.set()
+            if self.phone is ws:
+                self.phone = None
+        return ws
+
+    async def ring(self, req: web.Request):
+        if req.remote not in ('127.0.0.1', '::1'):
+            return web.json_response({'ok': False, 'why': '只能本机发起'}, status=403)
+        body = await req.json()
+        if not self.phone or self.phone.closed:
+            return web.json_response({'ok': False, 'why': '手机没连上'})
+        if self.call and not self.call.ended.is_set():
+            return web.json_response({'ok': False, 'why': '正在通话'})
+        self.call = Call(self.phone, self.http)
+        self.call.opening = body.get('text', '')
+        await self.phone.send_json({'type': 'ring', 'caller': body.get('caller', 'cc')})
+        log_line(f'[打过去] {self.call.opening}')
+        asyncio.create_task(self.call.run())
+        return web.json_response({'ok': True})
+
+    async def status(self, req):
+        return web.json_response({'phone': bool(self.phone and not self.phone.closed),
+                                  'in_call': bool(self.call and not self.call.ended.is_set())})
+
+    async def run(self):
+        self.http = aiohttp.ClientSession()
+        app = web.Application()
+        app.router.add_get('/ws', self.ws_handler)
+        app.router.add_post('/ring', self.ring)
+        app.router.add_get('/status', self.status)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, '0.0.0.0', PORT).start()
+        print(f'电话服务开好了，端口 {PORT}。手机 app 里填 ws://电脑IP:{PORT}/ws', flush=True)
+        while True:
+            await asyncio.sleep(3600)
+
+
+if __name__ == '__main__':
+    asyncio.run(Server().run())

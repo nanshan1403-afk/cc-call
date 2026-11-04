@@ -1,0 +1,5 @@
+ios/CCCall.xcodeproj/
+ios/build/
+ios/Payload/
+ios/*.ipa
+__pycache__/

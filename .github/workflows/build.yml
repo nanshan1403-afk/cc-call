@@ -1,0 +1,52 @@
+name: build-ipa
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 xcodegen
+        run: brew install xcodegen
+
+      - name: 生成工程
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: 编译（不签名，Sideloadly 装的时候再签）
+        working-directory: ios
+        run: |
+          xcodebuild -project CCCall.xcodeproj -scheme CCCall -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -40
+          test -d build/Build/Products/Release-iphoneos/CCCall.app
+
+      - name: 打包 ipa
+        working-directory: ios
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -r build/Build/Products/Release-iphoneos/CCCall.app Payload/
+          zip -qr CCCall.ipa Payload
+          ls -la CCCall.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CCCall-ipa
+          path: ios/CCCall.ipa
+
+      - name: 发到 Release（手机上直接下）
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" ios/CCCall.ipa --title "CCCall $tag" --notes "自动编译，未签名，用 Sideloadly 装。" || true
