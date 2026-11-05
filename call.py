@@ -18,16 +18,20 @@ def post(path, body):
 
 
 args = sys.argv[1:]
-win, say, hangup = None, False, False
-while args and args[0].startswith('--'):
-    k = args.pop(0)
+win, say, hangup, words = None, False, False, []
+i = 0
+while i < len(args):          # 旗子放哪儿都行，剩下的都是要说的话
+    k = args[i]
     if k == '--win':
-        win = args.pop(0)
-    elif k == '--say':
+        win = args[i + 1]; i += 2; continue
+    if k == '--say':
         say = True
     elif k == '--hangup':
         hangup = True
-text = ' '.join(args)
+    else:
+        words.append(k)
+    i += 1
+text = ' '.join(words)
 if say:
     print(post('/say', {'text': text, 'hangup': hangup}))
 else:
