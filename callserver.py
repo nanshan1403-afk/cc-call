@@ -119,13 +119,23 @@ async def stt(session: aiohttp.ClientSession, pcm16k: bytes) -> str:
     form.add_field('model_id', 'scribe_v1')
     form.add_field('language_code', 'zho')
     form.add_field('file', wav_bytes(pcm16k, SR_IN), filename='a.wav', content_type='audio/wav')
-    async with session.post('https://api.elevenlabs.io/v1/speech-to-text',
-                            headers={'xi-api-key': ELEVEN_KEY}, data=form, timeout=60) as r:
-        if r.status != 200:
-            log_line(f'[STT失败 {r.status}] {(await r.text())[:200]}')
-            return ''
-        j = await r.json()
-        return (j.get('text') or '').strip()
+    for attempt in range(2):
+        try:
+            async with session.post('https://api.elevenlabs.io/v1/speech-to-text',
+                                    headers={'xi-api-key': ELEVEN_KEY, 'Connection': 'close'}, data=form,
+                                    timeout=aiohttp.ClientTimeout(total=40, connect=10, sock_read=20)) as r:
+                if r.status != 200:
+                    log_line(f'[STT失败 {r.status}] {(await r.text())[:200]}')
+                    return ''
+                j = await r.json()
+                return (j.get('text') or '').strip()
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            log_line(f'[STT超时/断 {attempt + 1}/2] {type(e).__name__}')
+            form = aiohttp.FormData()
+            form.add_field('model_id', 'scribe_v1')
+            form.add_field('language_code', 'zho')
+            form.add_field('file', wav_bytes(pcm16k, SR_IN), filename='a.wav', content_type='audio/wav')
+    return ''
 
 
 async def tts_stream(session: aiohttp.ClientSession, text: str, voice: str):
@@ -133,13 +143,25 @@ async def tts_stream(session: aiohttp.ClientSession, text: str, voice: str):
     url = f'https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream?output_format=pcm_24000'
     body = {'text': text, 'model_id': TTS_MODEL, 'language_code': 'zh',
             'voice_settings': {'stability': 0.36, 'similarity_boost': 0.75, 'style': 0.85, 'speed': 1.2}}   # 跟 say.py 一样，她听惯的
-    async with session.post(url, headers={'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json'},
-                            json=body, timeout=120) as r:
-        if r.status != 200:
-            log_line(f'[TTS失败 {r.status}] {(await r.text())[:200]}')
+    # 1105 上午 5.5 发现：闲一会儿之后连接池里那条到 elevenlabs 的长连接会悄悄死掉，post 卡住、整数 timeout 不醒，电话就哑。
+    # 所以：每次新连（Connection: close）、真超时、第一块没到就重试一次、超时记日志。
+    for attempt in range(2):
+        got = False
+        try:
+            async with session.post(url, headers={'xi-api-key': ELEVEN_KEY, 'Content-Type': 'application/json',
+                                                  'Connection': 'close'},
+                                    json=body, timeout=aiohttp.ClientTimeout(total=90, connect=10, sock_read=15)) as r:
+                if r.status != 200:
+                    log_line(f'[TTS失败 {r.status}] {(await r.text())[:200]}')
+                    return
+                async for chunk in r.content.iter_chunked(4800):
+                    got = True
+                    yield chunk
             return
-        async for chunk in r.content.iter_chunked(4800):
-            yield chunk
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            log_line(f'[TTS超时/断 {attempt + 1}/2] {type(e).__name__}{"（已出声，不重试）" if got else ""}')
+            if got:
+                return
 
 
 def _claude_sync(text: str, win: str) -> str:
@@ -485,7 +507,7 @@ class Server:
                                   'in_call': bool(self.call and not self.call.ended.is_set())})
 
     async def run(self):
-        self.http = aiohttp.ClientSession()
+        self.http = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True))
         app = web.Application()
         app.router.add_get('/ws', self.ws_handler)
         app.router.add_post('/ring', self.ring)
