@@ -250,6 +250,10 @@ class Call:
         log_line(f'{self.name}：{text}')
         self.lines.append({'who': 'cc', 'text': text, 't': time.time()})
         await self.send({'type': 'line', 'who': 'cc', 'text': text})
+        # 窗口模式下我想回话的那半分钟里，她那头的帧一直往队列里堆；不清掉，
+        # 打断检测一上来就读到这些旧帧，判成"她打断了"，一个字节都发不出去（1105 19:43）
+        while not self.audio_q.empty():
+            self.audio_q.get_nowait()
         watcher = asyncio.create_task(self._watch_interrupt())
         n = 0
         t0 = time.monotonic()
@@ -366,6 +370,7 @@ class Call:
         try:
             await self._run()
         finally:
+            self.ended.set()   # 挂断后状态要松开，不然 /status 一直通话中，下一通打不出去
             self.save()
 
     async def _run(self):
