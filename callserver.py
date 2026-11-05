@@ -244,7 +244,7 @@ class Call:
                 await self.ws.send_bytes(loud)
                 n += len(loud)
             # 发得比播得快：等手机把缓冲放完再开麦。等的时候她照样能打断。
-            deadline = t0 + n / (24000 * 2) + 0.3
+            deadline = t0 + n / (24000 * 2) + 1.0   # t0 是开始拉 TTS 的时间，手机那头还有隧道往返和缓冲，多留一秒
             while time.monotonic() < deadline and not self.interrupted and not self.ended.is_set():
                 await asyncio.sleep(0.05)
         finally:
@@ -366,6 +366,8 @@ class Call:
                 await self.say(reply)
             if hang:
                 break
+        if not self.ended.is_set():
+            await asyncio.sleep(2.0)   # 最后一句让手机播完再挂（留言和 --hangup 都靠这个）
         await self.send({'type': 'hangup'})
         await self.emit({'t': 'hangup', 'frames': self.frames})
         log_line(f'[挂断] 这通收到她 {self.frames} 帧')
