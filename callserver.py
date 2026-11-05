@@ -31,6 +31,7 @@ BRIDGE = HERE.parent / 'bridge'
 BRIDGE_CFG = json.loads((BRIDGE / 'bridge.json').read_text(encoding='utf-8'))
 STATE = BRIDGE / 'state.json'          # 跟桥共用会话：电话里的我和手机文字里的我是同一个
 LOG_DIR = Path('D:/克/对话')
+HISTORY = HERE / 'calls.jsonl'          # 每通电话一条：谁打的、几点、多久、字幕
 
 PORT = int(os.environ.get('CC_CALL_PORT', 8766))   # 测试时换个口，别碰她手机连着的那个
 HOST = os.environ.get('CC_CALL_HOST', '0.0.0.0')   # 测试时设成 127.0.0.1
@@ -102,6 +103,22 @@ def load_json(p, default):
 
 def save_json(p, data):
     Path(p).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def load_history(limit=50, full=False) -> list[dict]:
+    """最近的通话，新的在前。full=False 不带字幕。"""
+    if not HISTORY.exists():
+        return []
+    out = []
+    for line in HISTORY.read_text(encoding='utf-8').splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not full:
+            r = {k: v for k, v in r.items() if k != 'lines'}
+        out.append(r)
+    return out[::-1][:limit]
 
 
 def log_line(text):
@@ -217,6 +234,10 @@ class Call:
         self.opening = ''
         self.one_way = False     # 留言：说完开场白就挂，她不用出声（上班时只能听）
         self.frames = 0          # 这通收到她多少帧，0 就是她那头麦克风没通
+        self.id = time.strftime('%Y%m%d-%H%M%S') + '-' + win
+        self.start = time.time()
+        self.answered_at: float | None = None
+        self.lines: list[dict] = []   # 字幕，存进历史
 
     async def send(self, obj):
         if not self.ws.closed:
@@ -227,6 +248,7 @@ class Call:
         self.interrupted = False
         await self.send({'type': 'state', 'v': 'speaking'})
         log_line(f'{self.name}：{text}')
+        self.lines.append({'who': 'cc', 'text': text, 't': time.time()})
         await self.send({'type': 'line', 'who': 'cc', 'text': text})
         watcher = asyncio.create_task(self._watch_interrupt())
         n = 0
@@ -329,7 +351,25 @@ class Call:
                     await self.say('我在，这边慢一点，等我一下。')
         return '我这边卡住了，先挂，等会儿打给你。', True
 
+    def record(self) -> dict:
+        end = time.time()
+        return {'id': self.id, 'win': self.win, 'name': self.name, 'start': self.start,
+                'answered': self.answered_at is not None,
+                'duration': int(end - self.answered_at) if self.answered_at else 0,
+                'one_way': self.one_way, 'window': self.window, 'lines': self.lines}
+
+    def save(self):
+        with open(HISTORY, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(self.record(), ensure_ascii=False) + '
+')
+
     async def run(self):
+        try:
+            await self._run()
+        finally:
+            self.save()
+
+    async def _run(self):
         try:
             await asyncio.wait_for(self.answered.wait(), timeout=45)
         except asyncio.TimeoutError:
@@ -339,6 +379,7 @@ class Call:
         if self.ended.is_set():
             log_line('[她没接，挂了]')
             return
+        self.answered_at = time.time()
         log_line('[接通]')
         await self.emit({'t': 'answered'})
         await self.say(self.opening or '喂，是我。')
@@ -361,6 +402,7 @@ class Call:
                 await self.say('没听清，再说一遍？')
                 continue
             log_line(f'南山：{heard}')
+            self.lines.append({'who': 'you', 'text': heard, 't': time.time()})
             await self.send({'type': 'line', 'who': 'you', 'text': heard})
             reply, hang = await self.reply_to(heard)
             if reply:
@@ -475,10 +517,16 @@ class Server:
                     elif t == 'hangup' and self.call:
                         self.call.ended.set()
                         self.call.answered.set()
+                    elif t == 'history':
+                        await ws.send_json({'type': 'history', 'calls': load_history(int(ev.get('limit') or 50))})
+                    elif t == 'transcript' and ev.get('id'):
+                        rec = next((r for r in load_history(500, full=True) if r['id'] == ev['id']), None)
+                        await ws.send_json({'type': 'transcript', 'id': ev['id'], 'lines': (rec or {}).get('lines', [])})
                     elif t == 'text' and self.call and ev.get('text'):
                         # 她不想出声时手机上打字也行
                         self.call.audio_q.put_nowait(b'')
                         log_line(f'南山(打字)：{ev["text"]}')
+                        self.call.lines.append({'who': 'you', 'text': ev['text'], 't': time.time()})
                         await self.call.send({'type': 'line', 'who': 'you', 'text': ev['text']})
                         reply, hang = await self.call.reply_to(ev['text'])
                         if reply:
