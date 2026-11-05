@@ -205,6 +205,7 @@ class Call:
         self.http = http
         self.win = win
         self.server = server
+        self.window = (win == ME)   # 窗口模式：她的话推给对应窗口，由那个窗口 /say 回；不走 claude -p
         self.reply_q: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()   # 窗口模式：我 POST /say 进来的回话
         self.voice = VOICES.get(win, VOICES[WIN])
         self.name = CALLERS.get(win, 'cc')
@@ -310,14 +311,14 @@ class Call:
 
     async def emit(self, obj):
         if self.server:
-            await self.server.emit(obj)
+            await self.server.emit({**obj, 'win': self.win})
 
     async def reply_to(self, heard: str) -> tuple[str, bool]:
         """拿到她的话，给出我的回话和要不要挂。窗口模式等真正的我；其他模式问 claude -p。"""
-        if self.win != ME:
+        if not self.window:
             reply = await think(heard, self.win)
             return reply.replace('[挂断]', '').strip(), '[挂断]' in reply
-        await self.emit({'t': 'heard', 'text': heard})
+        await self.emit({'t': 'heard', 'text': heard, 'name': self.name})
         for attempt in range(2):
             try:
                 return await asyncio.wait_for(self.reply_q.get(), timeout=REPLY_WAIT)
@@ -339,7 +340,7 @@ class Call:
             log_line('[她没接，挂了]')
             return
         log_line('[接通]')
-        await self.emit({'t': 'answered', 'win': self.win})
+        await self.emit({'t': 'answered'})
         await self.say(self.opening or '喂，是我。')
         quiet_rounds = 0
         while not self.ended.is_set() and not self.one_way:
@@ -379,17 +380,19 @@ class Server:
         self.call: Call | None = None
         self.http: aiohttp.ClientSession | None = None
         self.bad: dict[str, list[float]] = {}     # 来源 → 最近十分钟密码错的时间
-        self.listeners: set[web.WebSocketResponse] = set()   # /events：我自己的窗口挂在这儿听
+        self.listeners: dict[web.WebSocketResponse, str | None] = {}   # /events?win=51：各窗口挂在这儿听自己的
 
     async def emit(self, obj):
         dead = []
-        for l in self.listeners:
+        for l, want in list(self.listeners.items()):
+            if want and obj.get('win') != want:
+                continue
             try:
                 await l.send_json(obj)
             except Exception:
                 dead.append(l)
         for l in dead:
-            self.listeners.discard(l)
+            self.listeners.pop(l, None)
 
     async def events(self, req: web.Request):
         """只给本机：每通电话里她说的话、接通、挂断，一行一个 JSON 推出来。"""
@@ -397,14 +400,17 @@ class Server:
             return web.json_response({'ok': False}, status=403)
         ws = web.WebSocketResponse(heartbeat=20)
         await ws.prepare(req)
-        self.listeners.add(ws)
-        await ws.send_json({'t': 'hello', 'phone': bool(self.phone and not self.phone.closed),
-                            'in_call': bool(self.call and not self.call.ended.is_set())})
+        want = req.query.get('win') or None      # 不带就全听
+        self.listeners[ws] = want
+        await ws.send_json({'t': 'hello', 'listening': want or 'all',
+                            'phone': bool(self.phone and not self.phone.closed),
+                            'in_call': bool(self.call and not self.call.ended.is_set()),
+                            'call_win': self.call.win if self.call and not self.call.ended.is_set() else None})
         try:
             async for _ in ws:
                 pass
         finally:
-            self.listeners.discard(ws)
+            self.listeners.pop(ws, None)
         return ws
 
     async def say(self, req: web.Request):
@@ -414,8 +420,11 @@ class Server:
         body = await req.json()
         if not (self.call and not self.call.ended.is_set()):
             return web.json_response({'ok': False, 'why': '没在通话'})
-        if self.call.win != ME:
+        if not self.call.window:
             return web.json_response({'ok': False, 'why': '这通不是窗口模式'})
+        who = str(body.get('win') or WIN)
+        if who != self.call.win:
+            return web.json_response({'ok': False, 'why': f'这通是 {self.call.win} 的，不是 {who} 的'})
         self.call.reply_q.put_nowait((str(body.get('text', '')).strip(), bool(body.get('hangup'))))
         return web.json_response({'ok': True})
 
@@ -494,9 +503,13 @@ class Server:
         if self.call and not self.call.ended.is_set():
             return web.json_response({'ok': False, 'why': '正在通话'})
         win = str(body.get('win') or WIN)
+        window = bool(body.get('window')) or win == ME
+        if win == ME:
+            win = WIN          # me 就是 51 的窗口模式
         if win not in WINS:
             return web.json_response({'ok': False, 'why': f'没有 {win} 这个窗口'})
         self.call = Call(self.phone, self.http, win, server=self)
+        self.call.window = window
         self.call.opening = body.get('text', '')
         self.call.one_way = bool(body.get('one_way'))
         await self.phone.send_json({'type': 'ring', 'caller': body.get('caller') or self.call.name})
