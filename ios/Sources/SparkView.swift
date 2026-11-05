@@ -40,27 +40,21 @@ struct SparkView: View {
     var spinning: Bool = true
     var color: Color = Color(red: 1.0, green: 0.478, blue: 0.349)   // #FF7A59，跟名字同色
 
-    @State private var angle: Double = 0
-    @State private var pulse = false
-
+    // 角度和呼吸都从时间算，不用 repeatForever——那个一旦起了就停不下来（spinning 变 false 还在转）。
+    // spinning=false 时 TimelineView 暂停，星星回正、不再呼吸。
     var body: some View {
-        SparkShape()
-            .fill(color)
-            .frame(width: size, height: size)
-            .rotationEffect(.degrees(angle))
-            .scaleEffect(pulse ? 1.06 : 0.96)
-            .onAppear { start() }
-            .onChange(of: spinning) { _ in start() }
-    }
-
-    private func start() {
-        guard spinning else {
-            withAnimation(.easeOut(duration: 0.6)) { pulse = false }
-            return
+        TimelineView(.animation(minimumInterval: nil, paused: !spinning)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            // 一圈 8 秒，慢慢转；同时 1.2 秒一次轻轻呼吸，像在等你接
+            let angle = spinning ? t.truncatingRemainder(dividingBy: 8) / 8 * 360 : 0
+            let scale = spinning ? 1.01 + 0.05 * sin(t * .pi / 1.2) : 1.0
+            SparkShape()
+                .fill(color)
+                .frame(width: size, height: size)
+                .rotationEffect(.degrees(angle))
+                .scaleEffect(scale)
         }
-        // 一圈 8 秒，慢慢转；同时 1.2 秒一次轻轻呼吸，像在等你接
-        withAnimation(.linear(duration: 8).repeatForever(autoreverses: false)) { angle = 360 }
-        withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) { pulse = true }
+        .frame(width: size, height: size)
     }
 }
 

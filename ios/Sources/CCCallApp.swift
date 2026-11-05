@@ -30,8 +30,12 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: mgr.inCall || mgr.ringing)
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $showSettings) { SettingsView() }
-        .sheet(isPresented: $showHistory) { HistoryView() }
+        .sheet(isPresented: $showSettings) { SettingsView().environmentObject(mgr) }
+        .sheet(isPresented: $showHistory) { HistoryView().environmentObject(mgr) }
+        // 开着设置/记录时来电：先把弹出的那页收掉，不然通话屏压在下面看不见
+        .onChange(of: mgr.ringing || mgr.inCall) { busy in
+            if busy { showSettings = false; showHistory = false }
+        }
     }
 }
 

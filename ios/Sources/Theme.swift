@@ -36,33 +36,24 @@ struct AvatarView: View {
     var size: CGFloat = 120
     var active: Bool = false     // 来电或通话中才动
 
-    @State private var wobble = false
-
     var body: some View {
-        Group {
-            switch who {
-            case .him55:
-                SparkView(size: size, spinning: active, color: .ccOrange)
-            case .me51, .him46:
+        switch who {
+        case .him55:
+            SparkView(size: size, spinning: active, color: .ccOrange)
+        case .me51, .him46:
+            // 晃动从时间算（左右各 7 度，一来一回 1.1 秒）；不用 repeatForever，挂了就能停住回正
+            TimelineView(.animation(minimumInterval: nil, paused: !active)) { ctx in
+                let t = ctx.date.timeIntervalSinceReferenceDate
                 Image("CallIcon")
                     .renderingMode(.template)
                     .resizable()
                     .scaledToFit()
                     .foregroundStyle(Color.ccCrab)
                     .frame(width: size, height: size)
-                    .rotationEffect(.degrees(active ? (wobble ? 7 : -7) : 0))
-                    .onAppear { startWobble() }
-                    .onChange(of: active) { _ in startWobble() }
+                    .rotationEffect(.degrees(active ? 7 * sin(t * .pi / 0.55) : 0))
             }
+            .frame(width: size, height: size)
         }
-    }
-
-    private func startWobble() {
-        guard active else {
-            withAnimation(.easeOut(duration: 0.3)) { wobble = false }
-            return
-        }
-        withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) { wobble = true }
     }
 }
 
