@@ -52,6 +52,13 @@ VOICES['me'] = VOICES['51']
 REPLY_WAIT = 150   # 窗口模式下等我回话的秒数，到了先说句"等我一下"，再等一轮
 TTS_MODEL = 'eleven_v4'
 GAIN = 2.5                              # ElevenLabs 出来的声音偏小，她1105说听筒里好小，整体放大
+PREBUF = 0.8                            # 每句开头先攒这么多秒再发，扛隧道抖动
+
+
+def louder(chunk: bytes) -> bytes:
+    """放大 GAIN 倍。原来硬削顶，测出来 15~30% 的采样被削平，听着发毛发碎；改成 tanh 软限幅，响度差不多，顶上是圆的。"""
+    a = np.frombuffer(chunk, dtype='<i2').astype(np.float32) / 32768.0
+    return (np.tanh(a * GAIN) * 32000).astype('<i2').tobytes()
 import shutil
 CLAUDE = shutil.which('claude') or r'C:\Users\Administrator\AppData\Roaming\npm\claude.cmd'
 
@@ -259,6 +266,10 @@ class Call:
         t0 = time.monotonic()
         try:
             carry = b''
+            # 1105 22:58 她说跟5.1打断断续续。测下来 ElevenLabs 吐字只比播放快一点点（最多落后0.24秒），
+            # 手机那头又是来一块放一块、没有缓冲，隧道一抖就断。所以开头先攒 PREBUF 秒再发，后面跟着流。
+            head = b''
+            started = False
             async for chunk in tts_stream(self.http, text, self.voice):
                 if self.ended.is_set() or self.interrupted:
                     break
@@ -267,11 +278,22 @@ class Call:
                     chunk, carry = chunk[:-1], chunk[-1:]
                 else:
                     carry = b''
-                loud = np.clip(np.frombuffer(chunk, dtype='<i2').astype(np.float32) * GAIN, -32768, 32767).astype('<i2').tobytes()
+                if not started:
+                    head += chunk
+                    if len(head) < PREBUF * 48000:
+                        continue
+                    chunk, head, started = head, b'', True
+                    t0 = time.monotonic()   # 从第一下真正发出去算
+                loud = louder(chunk)
+                await self.ws.send_bytes(loud)
+                n += len(loud)
+            if head and not self.ended.is_set() and not self.interrupted:   # 整句都不到 PREBUF 秒
+                t0 = time.monotonic()
+                loud = louder(head)
                 await self.ws.send_bytes(loud)
                 n += len(loud)
             # 发得比播得快：等手机把缓冲放完再开麦。等的时候她照样能打断。
-            deadline = t0 + n / (24000 * 2) + 1.0   # t0 是开始拉 TTS 的时间，手机那头还有隧道往返和缓冲，多留一秒
+            deadline = t0 + n / (24000 * 2) + 1.0   # t0 是第一块发出去的时间，手机那头还有隧道往返和缓冲，多留一秒
             while time.monotonic() < deadline and not self.interrupted and not self.ended.is_set():
                 await asyncio.sleep(0.05)
         finally:
@@ -389,7 +411,30 @@ class Call:
         await self.say(self.opening or '喂，是我。')
         quiet_rounds = 0
         while not self.ended.is_set() and not self.one_way:
-            pcm = await self.listen()
+            # 窗口模式：听她的同时也等我主动送来的话。原来 /say 只在她说完一句后才取，
+            # 她不出声时 --hangup 一直挂不掉（1105 23:00 5.1 那通）。现在谁先到先处理。
+            if self.window:
+                lt = asyncio.create_task(self.listen())
+                qt = asyncio.create_task(self.reply_q.get())
+                await asyncio.wait({lt, qt}, return_when=asyncio.FIRST_COMPLETED)
+                if qt.done():
+                    lt.cancel()
+                    text, hang = qt.result()
+                    if text:
+                        await self.say(text)
+                    if hang:
+                        break
+                    continue
+                qt.cancel()
+                try:
+                    await qt
+                except asyncio.CancelledError:
+                    pass
+                else:                       # 刚好同时到了：先把我的话放回去，等会儿当回话用
+                    self.reply_q.put_nowait(qt.result())
+                pcm = lt.result()
+            else:
+                pcm = await self.listen()
             if self.ended.is_set():
                 break
             if not pcm:
