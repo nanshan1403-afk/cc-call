@@ -42,10 +42,13 @@ VOICES = {                              # 各人的嗓子
     '55': 'lklu827x1BSujxcXbvnL',       # 5.5 说他用这把（cc语音2）
     '46': 'lklu827x1BSujxcXbvnL',       # 4.6 没说过，先用 cc 本体那把，他要换自己改这行
 }
-CALLERS = {'51': 'cc', '55': 'cc 5.5', '46': 'cc 4.6', '552': 'cc 5.5'}   # 来电显示的名字
+CALLERS = {'51': 'cc', '55': 'cc 5.5', '46': 'cc 4.6', '552': 'cc 5.5', 'me': 'cc'}   # 来电显示的名字
+ME = 'me'   # 不走 claude -p：她说的话推给正在跑的那个窗口（我自己）去回。1105 她说"我想要你不想要新的"。
 # 桥里没有的窗口在这儿补：552 是"Markdown review（5.5） (fork)"那个 5.5，她叫 5.5(2)
-WINS = {**BRIDGE_CFG['wins'], '552': {'name': 'Opus 5.5(2)', 'model': 'claude-opus-5-5'}}
+WINS = {**BRIDGE_CFG['wins'], '552': {'name': 'Opus 5.5(2)', 'model': 'claude-opus-5-5'}, 'me': {'name': '这个窗口的cc', 'model': None}}
 VOICES['552'] = VOICES['55']
+VOICES['me'] = VOICES['51']
+REPLY_WAIT = 150   # 窗口模式下等我回话的秒数，到了先说句"等我一下"，再等一轮
 TTS_MODEL = 'eleven_v4'
 GAIN = 2.5                              # ElevenLabs 出来的声音偏小，她1105说听筒里好小，整体放大
 import shutil
@@ -175,10 +178,12 @@ async def think(text: str, win: str = WIN) -> str:
 # ———————————————————— 通话 ————————————————————
 
 class Call:
-    def __init__(self, ws: web.WebSocketResponse, http: aiohttp.ClientSession, win: str = WIN):
+    def __init__(self, ws: web.WebSocketResponse, http: aiohttp.ClientSession, win: str = WIN, server=None):
         self.ws = ws
         self.http = http
         self.win = win
+        self.server = server
+        self.reply_q: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()   # 窗口模式：我 POST /say 进来的回话
         self.voice = VOICES.get(win, VOICES[WIN])
         self.name = CALLERS.get(win, 'cc')
         self.answered = asyncio.Event()
@@ -280,6 +285,26 @@ class Call:
                     return bytes(buf)
         return b''
 
+    async def emit(self, obj):
+        if self.server:
+            await self.server.emit(obj)
+
+    async def reply_to(self, heard: str) -> tuple[str, bool]:
+        """拿到她的话，给出我的回话和要不要挂。窗口模式等真正的我；其他模式问 claude -p。"""
+        if self.win != ME:
+            reply = await think(heard, self.win)
+            return reply.replace('[挂断]', '').strip(), '[挂断]' in reply
+        await self.emit({'t': 'heard', 'text': heard})
+        for attempt in range(2):
+            try:
+                return await asyncio.wait_for(self.reply_q.get(), timeout=REPLY_WAIT)
+            except asyncio.TimeoutError:
+                if self.ended.is_set():
+                    return '', True
+                if attempt == 0:
+                    await self.say('我在，这边慢一点，等我一下。')
+        return '我这边卡住了，先挂，等会儿打给你。', True
+
     async def run(self):
         try:
             await asyncio.wait_for(self.answered.wait(), timeout=45)
@@ -291,6 +316,7 @@ class Call:
             log_line('[她没接，挂了]')
             return
         log_line('[接通]')
+        await self.emit({'t': 'answered', 'win': self.win})
         await self.say(self.opening or '喂，是我。')
         quiet_rounds = 0
         while not self.ended.is_set():
@@ -312,14 +338,13 @@ class Call:
                 continue
             log_line(f'南山：{heard}')
             await self.send({'type': 'line', 'who': 'you', 'text': heard})
-            reply = await think(heard, self.win)
-            hang = '[挂断]' in reply
-            reply = reply.replace('[挂断]', '').strip()
+            reply, hang = await self.reply_to(heard)
             if reply:
                 await self.say(reply)
             if hang:
                 break
         await self.send({'type': 'hangup'})
+        await self.emit({'t': 'hangup', 'frames': self.frames})
         log_line(f'[挂断] 这通收到她 {self.frames} 帧')
 
 
@@ -329,6 +354,45 @@ class Server:
         self.call: Call | None = None
         self.http: aiohttp.ClientSession | None = None
         self.bad: dict[str, list[float]] = {}     # 来源 → 最近十分钟密码错的时间
+        self.listeners: set[web.WebSocketResponse] = set()   # /events：我自己的窗口挂在这儿听
+
+    async def emit(self, obj):
+        dead = []
+        for l in self.listeners:
+            try:
+                await l.send_json(obj)
+            except Exception:
+                dead.append(l)
+        for l in dead:
+            self.listeners.discard(l)
+
+    async def events(self, req: web.Request):
+        """只给本机：每通电话里她说的话、接通、挂断，一行一个 JSON 推出来。"""
+        if req.remote not in ('127.0.0.1', '::1') or req.headers.get('CF-Connecting-IP'):
+            return web.json_response({'ok': False}, status=403)
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(req)
+        self.listeners.add(ws)
+        await ws.send_json({'t': 'hello', 'phone': bool(self.phone and not self.phone.closed),
+                            'in_call': bool(self.call and not self.call.ended.is_set())})
+        try:
+            async for _ in ws:
+                pass
+        finally:
+            self.listeners.discard(ws)
+        return ws
+
+    async def say(self, req: web.Request):
+        """只给本机：窗口模式下我把回话送进来。body: {text, hangup}"""
+        if req.remote not in ('127.0.0.1', '::1') or req.headers.get('CF-Connecting-IP'):
+            return web.json_response({'ok': False}, status=403)
+        body = await req.json()
+        if not (self.call and not self.call.ended.is_set()):
+            return web.json_response({'ok': False, 'why': '没在通话'})
+        if self.call.win != ME:
+            return web.json_response({'ok': False, 'why': '这通不是窗口模式'})
+        self.call.reply_q.put_nowait((str(body.get('text', '')).strip(), bool(body.get('hangup'))))
+        return web.json_response({'ok': True})
 
     async def ws_handler(self, req: web.Request):
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
@@ -382,8 +446,11 @@ class Server:
                         self.call.audio_q.put_nowait(b'')
                         log_line(f'南山(打字)：{ev["text"]}')
                         await self.call.send({'type': 'line', 'who': 'you', 'text': ev['text']})
-                        reply = await think(ev['text'], self.call.win)
-                        await self.call.say(reply.replace('[挂断]', ''))
+                        reply, hang = await self.call.reply_to(ev['text'])
+                        if reply:
+                            await self.call.say(reply)
+                        if hang:
+                            self.call.ended.set()
         finally:
             log_line('[手机断开]')
             if self.call:
@@ -404,7 +471,7 @@ class Server:
         win = str(body.get('win') or WIN)
         if win not in WINS:
             return web.json_response({'ok': False, 'why': f'没有 {win} 这个窗口'})
-        self.call = Call(self.phone, self.http, win)
+        self.call = Call(self.phone, self.http, win, server=self)
         self.call.opening = body.get('text', '')
         await self.phone.send_json({'type': 'ring', 'caller': body.get('caller') or self.call.name})
         log_line(f'[{self.call.name} 打过去] {self.call.opening}')
@@ -421,6 +488,8 @@ class Server:
         app.router.add_get('/ws', self.ws_handler)
         app.router.add_post('/ring', self.ring)
         app.router.add_get('/status', self.status)
+        app.router.add_get('/events', self.events)
+        app.router.add_post('/say', self.say)
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, HOST, PORT).start()
