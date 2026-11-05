@@ -6,21 +6,84 @@ struct CCCallApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView().environmentObject(mgr)
+            RootView().environmentObject(mgr)
         }
     }
 }
 
-struct ContentView: View {
+/// 深蓝底。待机是小螃蟹；来电/通话换成通话屏。右上角通话记录，左上角设置。
+struct RootView: View {
     @EnvironmentObject var mgr: CallManager
-    @AppStorage("serverURL") private var serverURL = "ws://192.168.1.2:8766/ws"
+    @State private var showSettings = false
+    @State private var showHistory = false
+
+    var body: some View {
+        ZStack {
+            Color.ccBackground.ignoresSafeArea()
+            if mgr.inCall || mgr.ringing {
+                CallScreen()
+                    .transition(.opacity)
+            } else {
+                StandbyView(showSettings: $showSettings, showHistory: $showHistory)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: mgr.inCall || mgr.ringing)
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $showHistory) { HistoryView() }
+    }
+}
+
+struct StandbyView: View {
+    @EnvironmentObject var mgr: CallManager
+    @Binding var showSettings: Bool
+    @Binding var showHistory: Bool
+
+    var body: some View {
+        VStack {
+            HStack {
+                Button { showSettings = true } label: {
+                    Image(systemName: "gearshape").font(.title3).foregroundStyle(Color.ccDim)
+                }
+                Spacer()
+                Button { showHistory = true } label: {
+                    Image(systemName: "list.bullet").font(.title3).foregroundStyle(Color.ccDim)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+
+            Spacer()
+            AvatarView(who: .me51, size: 150, active: false)
+            Text("cc")
+                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.ccBlue)
+                .padding(.top, 18)
+            Text(mgr.connState)
+                .font(.footnote)
+                .foregroundStyle(Color.ccDim)
+                .padding(.top, 6)
+            Spacer()
+            Text(mgr.wantConnected ? "开着就行，回桌面也行，别从后台划掉" : "左上角填电脑地址和密码，打开保持连接")
+                .font(.caption)
+                .foregroundStyle(Color.ccDim)
+                .padding(.bottom, 24)
+        }
+    }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject var mgr: CallManager
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("serverURL") private var serverURL = "wss://call.nanshancn.cc/ws"
     @AppStorage("password") private var password = ""
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("电脑") {
-                    TextField("ws://电脑IP:8766/ws", text: $serverURL)
+                    TextField("wss://…/ws", text: $serverURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -30,37 +93,12 @@ struct ContentView: View {
                         set: { mgr.setWant($0, url: serverURL, pw: password) }))
                 }
                 Section("状态") {
-                    row("连接", mgr.connState)
-                    row("通话", mgr.callState)
-                }
-                if !mgr.lines.isEmpty {
-                    Section("这通电话") {   // 先这么摆着，界面她回来设计
-                        ForEach(mgr.lines) { l in
-                            HStack(alignment: .top) {
-                                Text(l.who == "cc" ? "cc" : "你").foregroundStyle(.secondary).frame(width: 28, alignment: .leading)
-                                Text(l.text)
-                            }
-                        }
-                    }
-                }
-                if mgr.inCall {
-                    Section {
-                        Button(role: .destructive) { mgr.hangupFromApp() } label: {
-                            HStack { Spacer(); Text("挂断"); Spacer() }
-                        }
-                    }
-                }
-                Section {
-                    Text("开着连接回桌面也行，别从后台划掉。cc 打来会像普通来电一样响，锁屏也能接。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    HStack { Text("连接"); Spacer(); Text(mgr.connState).foregroundStyle(.secondary) }
+                    HStack { Text("通话"); Spacer(); Text(mgr.callState).foregroundStyle(.secondary) }
                 }
             }
-            .navigationTitle("cc")
+            .navigationTitle("设置")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("好") { dismiss() } } }
         }
-    }
-
-    private func row(_ k: String, _ v: String) -> some View {
-        HStack { Text(k); Spacer(); Text(v).foregroundStyle(.secondary) }
     }
 }

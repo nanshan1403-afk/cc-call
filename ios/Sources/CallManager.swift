@@ -1,15 +1,38 @@
 import Foundation
 import Combine
+import AVFoundation
 
-/// 跟电脑上的 callserver.py 保持一条 WebSocket；来电、接听、挂断、音频都走它。
+/// 跟电脑上的 callserver.py 保持一条 WebSocket；来电、接听、挂断、音频、字幕、历史都走它。
 final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     static let shared = CallManager()
+
+    struct Line: Identifiable {
+        let id = UUID()
+        let who: String      // "cc" / "you"
+        let text: String
+    }
+
+    struct CallRecord: Identifiable, Decodable {
+        let id: String
+        let win: String
+        let name: String
+        let start: Double
+        let answered: Bool
+        let duration: Int
+        let one_way: Bool
+    }
 
     @Published var connState = "没连"
     @Published var callState = "空闲"
     @Published var inCall = false
-    @Published var lines: [Line] = []        // 这通电话里她说的、我说的，给界面用
-    struct Line: Identifiable { let id = UUID(); let who: String; let text: String }
+    @Published var ringing = false
+    @Published var caller = "cc"                 // 这通是谁：cc / cc 5.5 / cc 4.6
+    @Published var callStart: Date?
+    @Published var lines: [Line] = []            // 这通电话里她说的、我说的
+    @Published var muted = false
+    @Published var speaker = false
+    @Published var history: [CallRecord] = []
+    @Published var transcripts: [String: [Line]] = [:]
     @Published private(set) var wantConnected = false
 
     private var url: URL?
@@ -59,13 +82,12 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
         }
     }
 
-    /// 把她手打的地址收拾干净：去空白、全角冒号斜杠换半角、没写 scheme 就补 wss://；不是 ws/wss 或没有 host 就不要。
+    /// 把她手打的地址收拾干净：去空白、全角冒号斜杠换半角、https 换 wss、没写 scheme 就补 wss://；不是 ws/wss 或没有 host 就不要。
     static func normalize(_ raw: String) -> URL? {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         s = s.replacingOccurrences(of: "：", with: ":")
              .replacingOccurrences(of: "／", with: "/")
              .replacingOccurrences(of: " ", with: "")
-        // 她打成 https://… 或 http://… 的，换成 wss/ws；什么都没写的补 wss://
         var low = s.lowercased()
         if low.hasPrefix("https://") { s = "wss://" + s.dropFirst(8) }
         else if low.hasPrefix("http://") { s = "ws://" + s.dropFirst(7) }
@@ -95,7 +117,24 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if on { reconnectDelay = 2; connect() } else { disconnect() }
     }
 
+    // MARK: - 通话里的三个键
+
     func hangupFromApp() { ring.endCallFromApp() }
+
+    func toggleMute() {
+        muted.toggle()
+        audio.muted = muted
+    }
+
+    func toggleSpeaker() {
+        speaker.toggle()
+        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(speaker ? .speaker : .none)
+    }
+
+    // MARK: - 历史
+
+    func requestHistory() { sendJSON(["type": "history", "limit": 60]) }
+    func requestTranscript(_ id: String) { sendJSON(["type": "transcript", "id": id]) }
 
     // MARK: - 连接
 
@@ -160,8 +199,7 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
                     // 响着没接的也算，不然来电界面会一直挂着
                     if self.ring.hasCall {
                         self.ring.failCall()
-                        self.inCall = false
-                        self.callState = "断线"
+                        self.callEnded(state: "断线")
                     }
                 }
                 self.scheduleReconnect()
@@ -193,27 +231,42 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
         case "hello":
             reconnectDelay = 2
             set(conn: "连着")
+            requestHistory()
         case "ring":
-            DispatchQueue.main.async { self.lines.removeAll() }
+            let name = ev["caller"] as? String ?? "cc"
+            DispatchQueue.main.async {
+                self.lines.removeAll()
+                self.caller = name
+                self.ringing = true
+            }
             set(call: "来电…")
-            ring.reportIncoming(from: ev["caller"] as? String ?? "cc")
+            ring.reportIncoming(from: name)
         case "cancel":
             ring.endCallFromRemote()
-            set(call: "空闲")
+            callEnded(state: "空闲")
         case "hangup":
             ring.endCallFromRemote()
-            DispatchQueue.main.async { self.inCall = false }
-            set(call: "挂了")
+            callEnded(state: "挂了")
         case "flush":
             audio.flush()
         case "line":
             let who = ev["who"] as? String ?? "cc"
-            let text = ev["text"] as? String ?? ""
-            DispatchQueue.main.async { self.lines.append(Line(who: who, text: text)) }
+            let t = ev["text"] as? String ?? ""
+            DispatchQueue.main.async { self.lines.append(Line(who: who, text: t)) }
         case "state":
             let v = ev["v"] as? String ?? ""
             let names = ["speaking": "他在说", "listening": "在听你", "thinking": "他在想"]
             set(call: names[v] ?? v)
+        case "history":
+            if let arr = ev["calls"], let d = try? JSONSerialization.data(withJSONObject: arr),
+               let recs = try? JSONDecoder().decode([CallRecord].self, from: d) {
+                DispatchQueue.main.async { self.history = recs }
+            }
+        case "transcript":
+            if let id = ev["id"] as? String, let arr = ev["lines"] as? [[String: Any]] {
+                let ls = arr.map { Line(who: $0["who"] as? String ?? "cc", text: $0["text"] as? String ?? "") }
+                DispatchQueue.main.async { self.transcripts[id] = ls }
+            }
         case "error":
             set(conn: ev["text"] as? String ?? "错误")
         default:
@@ -222,7 +275,13 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
     }
 
     private func answered() {
-        DispatchQueue.main.async { self.inCall = true }
+        DispatchQueue.main.async {
+            self.ringing = false
+            self.inCall = true
+            self.callStart = Date()
+            self.muted = false
+            self.speaker = false
+        }
         set(call: "接通")
         sendJSON(["type": "answer"])
         // 有时 CallKit 不回调 didActivate（session 本来就是激活的），一秒没动静就自己起引擎
@@ -234,9 +293,21 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
     }
 
     private func endedByUser() {
-        DispatchQueue.main.async { self.inCall = false }
         sendJSON(["type": "hangup"])
-        set(call: "挂了")
+        callEnded(state: "挂了")
+    }
+
+    private func callEnded(state: String) {
+        DispatchQueue.main.async {
+            self.ringing = false
+            self.inCall = false
+            self.callStart = nil
+            self.callState = state
+            self.audio.muted = false
+            self.muted = false
+            self.speaker = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestHistory() }
     }
 
     private func send(data: Data) {

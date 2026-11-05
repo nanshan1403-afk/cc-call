@@ -4,6 +4,7 @@ import AVFoundation
 final class AudioIO {
     var onMic: ((Data) -> Void)?
     var onError: ((String) -> Void)?
+    var muted = false            // 静音：照样发帧，但全是 0，电脑那头就当她没说话
     private(set) var isRunning = false
 
     private let engine = AVAudioEngine()
@@ -95,7 +96,8 @@ final class AudioIO {
             return buf
         }
         guard err == nil, out.frameLength > 0, let ch = out.int16ChannelData else { return }
-        onMic?(Data(bytes: ch[0], count: Int(out.frameLength) * 2))
+        let n = Int(out.frameLength) * 2
+        onMic?(muted ? Data(count: n) : Data(bytes: ch[0], count: n))
     }
 
     func play(pcm24k data: Data) {
