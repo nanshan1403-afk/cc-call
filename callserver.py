@@ -360,8 +360,7 @@ class Call:
 
     def save(self):
         with open(HISTORY, 'a', encoding='utf-8') as fh:
-            fh.write(json.dumps(self.record(), ensure_ascii=False) + '
-')
+            fh.write(json.dumps(self.record(), ensure_ascii=False) + chr(10))
 
     async def run(self):
         try:
