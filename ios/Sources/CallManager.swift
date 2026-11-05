@@ -95,9 +95,13 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if !low.hasPrefix("ws://") && !low.hasPrefix("wss://") {
             s = "wss://" + s
         }
-        guard let u = URL(string: s),
+        guard var u = URL(string: s),
               let scheme = u.scheme?.lowercased(), scheme == "ws" || scheme == "wss",
               let host = u.host, !host.isEmpty else { return nil }
+        // 隧道只放行 /ws，路径空着或只有 / 就补上（1105 晚上重装后地址变成 .../ 连不上）
+        if u.path.isEmpty || u.path == "/" {
+            u = URL(string: "\(scheme)://\(host)\(u.port.map { ":\($0)" } ?? "")/ws") ?? u
+        }
         return u
     }
 
