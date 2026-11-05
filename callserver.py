@@ -192,6 +192,7 @@ class Call:
         self.interrupted = False
         self.audio_q: asyncio.Queue[bytes] = asyncio.Queue()
         self.opening = ''
+        self.one_way = False     # 留言：说完开场白就挂，她不用出声（上班时只能听）
         self.frames = 0          # 这通收到她多少帧，0 就是她那头麦克风没通
 
     async def send(self, obj):
@@ -319,7 +320,7 @@ class Call:
         await self.emit({'t': 'answered', 'win': self.win})
         await self.say(self.opening or '喂，是我。')
         quiet_rounds = 0
-        while not self.ended.is_set():
+        while not self.ended.is_set() and not self.one_way:
             pcm = await self.listen()
             if self.ended.is_set():
                 break
@@ -473,6 +474,7 @@ class Server:
             return web.json_response({'ok': False, 'why': f'没有 {win} 这个窗口'})
         self.call = Call(self.phone, self.http, win, server=self)
         self.call.opening = body.get('text', '')
+        self.call.one_way = bool(body.get('one_way'))
         await self.phone.send_json({'type': 'ring', 'caller': body.get('caller') or self.call.name})
         log_line(f'[{self.call.name} 打过去] {self.call.opening}')
         asyncio.create_task(self.call.run())

@@ -2,6 +2,7 @@
   python D:/克/app/call/call.py [--win 51|55|46|552|me] "开场白"   打过去（me = 这个窗口的我接）
   python D:/克/app/call/call.py --say "回话"                       窗口模式下把回话念给她
   python D:/克/app/call/call.py --say "再见" --hangup               念完挂断
+  python D:/克/app/call/call.py --leave "一句话"                     留言：响、她接、我说完就挂，她不用出声
 要先跑着 callserver.py，而且她手机上的 CCCall 连着。"""
 import json
 import os
@@ -18,7 +19,7 @@ def post(path, body):
 
 
 args = sys.argv[1:]
-win, say, hangup, words = None, False, False, []
+win, say, hangup, leave, words = None, False, False, False, []
 i = 0
 while i < len(args):          # 旗子放哪儿都行，剩下的都是要说的话
     k = args[i]
@@ -28,6 +29,8 @@ while i < len(args):          # 旗子放哪儿都行，剩下的都是要说的
         say = True
     elif k == '--hangup':
         hangup = True
+    elif k == '--leave':
+        leave = True
     else:
         words.append(k)
     i += 1
@@ -38,4 +41,6 @@ else:
     body = {'text': text or '喂，是我。'}
     if win:
         body['win'] = win
+    if leave:
+        body['one_way'] = True
     print(post('/ring', body))
