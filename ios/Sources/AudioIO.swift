@@ -151,7 +151,8 @@ final class KeepAlive {
         guard wanted else { return }
         paused = false
         let s = AVAudioSession.sharedInstance()
-        try? s.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth])
+        // 保活只放无声，用普通播放通道跟她的音乐混着，不占通话通道（1105 她说一开 app 音乐就变味）。接电话时 RingService 再切 playAndRecord。
+        try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         try? s.setActive(true)
         if player == nil {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("silence.wav")
