@@ -4,12 +4,15 @@
   python D:/克/app/call/call.py --say "再见" --hangup               念完挂断
 要先跑着 callserver.py，而且她手机上的 CCCall 连着。"""
 import json
+import os
 import sys
 import urllib.request
 
+PORT = os.environ.get('CC_CALL_PORT', '8766')
+
 
 def post(path, body):
-    req = urllib.request.Request(f'http://127.0.0.1:8766{path}', data=json.dumps(body).encode('utf-8'),
+    req = urllib.request.Request(f'http://127.0.0.1:{PORT}{path}', data=json.dumps(body).encode('utf-8'),
                                  headers={'Content-Type': 'application/json'})
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 

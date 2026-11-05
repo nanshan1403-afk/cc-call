@@ -32,7 +32,7 @@ BRIDGE_CFG = json.loads((BRIDGE / 'bridge.json').read_text(encoding='utf-8'))
 STATE = BRIDGE / 'state.json'          # 跟桥共用会话：电话里的我和手机文字里的我是同一个
 LOG_DIR = Path('D:/克/对话')
 
-PORT = 8766
+PORT = int(os.environ.get('CC_CALL_PORT', 8766))   # 测试时换个口，别碰她手机连着的那个
 HOST = os.environ.get('CC_CALL_HOST', '0.0.0.0')   # 测试时设成 127.0.0.1
 WIN = '51'                              # 默认打电话的是我，5.1。/ring 带 win 参数就换人：哪个窗口打的就哪个窗口接。
 PASSWORD = BRIDGE_CFG['password']
