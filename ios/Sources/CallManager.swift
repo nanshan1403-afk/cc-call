@@ -65,7 +65,10 @@ final class CallManager: NSObject, ObservableObject, URLSessionWebSocketDelegate
             if self.wantConnected { self.keepAlive.resume() }   // 通话完把无声保活放回去，不然后台很快被挂起
         }
         audio.onMic = { [weak self] data in self?.send(data: data) }
-        audio.onError = { [weak self] msg in self?.set(call: msg) }
+        audio.onError = { [weak self] msg in
+            self?.set(call: msg)
+            self?.sendJSON(["type": "note", "v": msg])   // 也报给电脑记进日志，查断音用
+        }
 
         wantConnected = UserDefaults.standard.bool(forKey: "wantConnected")
         if wantConnected {

@@ -598,6 +598,8 @@ class Server:
                         log_line(f'[手机发来挂断，距接听 {time.time() - a:.1f} 秒]' if a else '[手机发来挂断，没收到接听]')
                         self.call.ended.set()
                         self.call.answered.set()
+                    elif t == 'note':
+                        log_line(f'[手机] {str(ev.get("v", ""))[:200]}')
                     elif t == 'history':
                         await ws.send_json({'type': 'history', 'calls': load_history(int(ev.get('limit') or 50))})
                     elif t == 'transcript' and ev.get('id'):

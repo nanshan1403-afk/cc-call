@@ -17,6 +17,10 @@ final class AudioIO {
 
     private final class Once { var used = false }
     private var cfgObserver: NSObjectProtocol?
+    // 已经交给 player 但还没播完的块。player.stop() 会把它们全扔掉，引擎重启时要重新排回去
+    //（1107 22:46 她戴蓝牙接 5.1：前两句听到，最后一句播到一半没声了）
+    private var inflight: [(id: Int, data: Data)] = []
+    private var nextId = 0
 
     init() {
         engine.attach(player)
@@ -33,12 +37,17 @@ final class AudioIO {
     /// 引擎被系统停了：拆掉旧的 tap，按新路由的格式重新起。排队没放完的我的声音留着接着放。
     private func _restart() {
         guard isRunning else { return }
+        // 先把没播完的收回来，放回 pending 最前面；_start 末尾会 drainPending 接着放。
+        // 播了一半的那块会从头再放一遍，宁可重复半句也别丢。
+        let unplayed = inflight.reduce(Data()) { $0 + $1.data }
+        inflight.removeAll()
+        pending = unplayed + pending
         if converter != nil { engine.inputNode.removeTap(onBus: 0) }
         player.stop()
         engine.stop()
         isRunning = false
         _start()
-        if isRunning { onError?("换了耳机/听筒，音频接上了") }
+        if isRunning { onError?("换了耳机/听筒，音频接上了" + (unplayed.isEmpty ? "" : "（接着放 \(String(format: "%.1f", Double(unplayed.count) / 48000)) 秒）")) }
     }
 
     func start() { q.async { self._start() } }
@@ -48,6 +57,7 @@ final class AudioIO {
     func flush() {
         q.async {
             self.pending.removeAll()
+            self.inflight.removeAll()
             if self.isRunning {
                 self.player.stop()
                 self.player.play()
@@ -100,6 +110,7 @@ final class AudioIO {
         engine.stop()
         isRunning = false
         pending.removeAll()
+        inflight.removeAll()
     }
 
     private func convertAndSend(_ buf: AVAudioPCMBuffer) {
@@ -138,8 +149,14 @@ final class AudioIO {
                 dst[i] = Float(Int16(littleEndian: v)) / 32768.0
             }
         }
+        let id = nextId
+        nextId += 1
+        inflight.append((id: id, data: Data(pending.prefix(n * 2))))
         pending.removeFirst(n * 2)
-        player.scheduleBuffer(buf, completionHandler: nil)
+        // 播完（或被 stop）时回调；回到 q 上删。重启时 inflight 已经清过，删不到旧 id 也没关系
+        player.scheduleBuffer(buf) { [weak self] in
+            self?.q.async { self?.inflight.removeAll { $0.id == id } }
+        }
         if !player.isPlaying { player.play() }
     }
 }
