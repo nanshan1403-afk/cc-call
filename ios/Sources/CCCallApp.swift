@@ -11,7 +11,7 @@ struct CCCallApp: App {
     }
 }
 
-/// 深蓝底。待机是小螃蟹；来电/通话换成通话屏。右上角通话记录，左上角设置。
+/// 淡橘黄底。待机是小螃蟹；来电/通话换成通话屏。右上角通话记录，左上角设置。
 struct RootView: View {
     @EnvironmentObject var mgr: CallManager
     @State private var showSettings = false
@@ -29,7 +29,7 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: mgr.inCall || mgr.ringing)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
         .sheet(isPresented: $showSettings) { SettingsView().environmentObject(mgr) }
         .sheet(isPresented: $showHistory) { HistoryView().environmentObject(mgr) }
         // 开着设置/记录时来电：先把弹出的那页收掉，不然通话屏压在下面看不见

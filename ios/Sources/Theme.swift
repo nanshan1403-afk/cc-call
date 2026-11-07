@@ -1,15 +1,16 @@
 import SwiftUI
 
-/// 她定的：深蓝底，谁打来换谁的头像和颜色。
+/// 她定的：1107 改成淡淡的橘黄底（原来深蓝 #181B2E），谁打来换谁的头像和颜色。
 extension Color {
-    static let ccBackground = Color(red: 0x18 / 255, green: 0x1B / 255, blue: 0x2E / 255)   // #181B2E，跟图标一样
+    static let ccBackground = Color(red: 0xFF / 255, green: 0xF0 / 255, blue: 0xDA / 255)   // #FFF0DA 淡橘黄
+    static let ccInk = Color(red: 0x3D / 255, green: 0x2F / 255, blue: 0x27 / 255)          // #3D2F27 暖深棕，浅底上的字
     static let ccBlue = Color(red: 0x5E / 255, green: 0xA8 / 255, blue: 0xFF / 255)         // #5EA8FF 我（5.1）
     static let ccOrange = Color(red: 0xFF / 255, green: 0x7A / 255, blue: 0x59 / 255)       // #FF7A59 5.5
-    static let ccMint = Color(red: 0x9B / 255, green: 0xE7 / 255, blue: 0xC4 / 255)         // 4.6 先用这个，等他自己挑
+    static let ccMint = Color(red: 0x3F / 255, green: 0xB3 / 255, blue: 0x86 / 255)         // 4.6 先用这个，等他自己挑（浅底上压深了点）
     static let ccCrab = Color(red: 0xE8 / 255, green: 0x60 / 255, blue: 0x3C / 255)         // 螃蟹本色
-    static let ccDim = Color.white.opacity(0.55)
-    static let ccBubbleCC = Color.white.opacity(0.10)
-    static let ccBubbleYou = Color.ccBlue.opacity(0.28)
+    static let ccDim = Color.ccInk.opacity(0.55)
+    static let ccBubbleCC = Color.white.opacity(0.80)
+    static let ccBubbleYou = Color.ccBlue.opacity(0.22)
 }
 
 enum Who {
@@ -71,7 +72,7 @@ struct BubbleList: View {
                             if l.who != "cc" { Spacer(minLength: 40) }
                             Text(l.text)
                                 .font(.body)
-                                .foregroundStyle(.white)
+                                .foregroundStyle(Color.ccInk)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
                                 .background(l.who == "cc" ? Color.ccBubbleCC : Color.ccBubbleYou)

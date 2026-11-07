@@ -17,7 +17,7 @@ struct HistoryView: View {
                         Section {
                             ForEach(mgr.history) { rec in
                                 NavigationLink(value: rec.id) { HistoryRow(rec: rec) }
-                                    .listRowBackground(Color.white.opacity(0.06))
+                                    .listRowBackground(Color.white.opacity(0.7))
                             }
                         } header: {
                             Text(todayStat).foregroundStyle(Color.ccDim)
@@ -32,7 +32,7 @@ struct HistoryView: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("好") { dismiss() } } }
             .onAppear { mgr.requestHistory() }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
     }
 
     private var todayStat: String {
@@ -109,7 +109,7 @@ struct TranscriptView: View {
                         BubbleList(lines: lines, who: who)
                     }
                 } else {
-                    Spacer(); ProgressView().tint(.white); Spacer()
+                    Spacer(); ProgressView().tint(Color.ccInk); Spacer()
                 }
             }
         }

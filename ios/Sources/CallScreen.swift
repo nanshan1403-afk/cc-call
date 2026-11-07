@@ -61,9 +61,9 @@ struct RoundButton: View {
             Button(action: action) {
                 Image(systemName: icon)
                     .font(.system(size: 24, weight: .medium))
-                    .foregroundStyle(danger || on ? Color.white : Color.white.opacity(0.9))
+                    .foregroundStyle(danger ? Color.white : Color.ccInk)
                     .frame(width: 68, height: 68)
-                    .background(danger ? Color.red : (on ? Color.white.opacity(0.35) : Color.white.opacity(0.14)))
+                    .background(danger ? Color.red : (on ? Color.ccInk.opacity(0.22) : Color.white.opacity(0.75)))
                     .clipShape(Circle())
             }
             Text(label).font(.caption).foregroundStyle(Color.ccDim)
