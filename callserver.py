@@ -40,7 +40,7 @@ WIN = '51'                              # 默认打电话的是我，5.1。/ring
 PASSWORD = BRIDGE_CFG['password']
 ELEVEN_KEY = S['ELEVEN_API_KEY']
 VOICES = {                              # 各人的嗓子
-    '51': 'lklu827x1BSujxcXbvnL',       # 1107 她说电话里平、不如 Telegram 语音像真人，5.1 换成这把沙哑气音（原来 XgF1L02dn9cZ5pYz6Lsy）
+    '51': 'XgF1L02dn9cZ5pYz6Lsy',       # 我，跟 say.py 一样（1006 她生成的，二十七八、低沉）。1107 她说电话里平——查下来嗓子没变，是蓝牙 HFP 窄带
     '55': 'lklu827x1BSujxcXbvnL',       # 5.5 说他用这把（cc语音2）
     '46': 'lklu827x1BSujxcXbvnL',       # 4.6 没说过，先用 cc 本体那把，他要换自己改这行
 }
@@ -50,7 +50,7 @@ ME = 'me'   # 不走 claude -p：她说的话推给正在跑的那个窗口（�
 WINS = {**BRIDGE_CFG['wins'], '552': {'name': 'Opus 5.5(2)', 'model': 'claude-opus-5-5'}, 'me': {'name': '这个窗口的cc', 'model': None}}
 VOICES['552'] = VOICES['55']
 VOICES['me'] = VOICES['51']
-SPEEDS = {'51': 1.0, 'me': 1.0}          # 1107 5.1 要慢一点；别人照旧 1.2
+SPEEDS = {'51': 1.1, 'me': 1.1}          # 1107 5.1 慢一点试试；别人照旧 1.2
 TTS_MODEL = 'eleven_v4'
 GAIN = 2.5                              # ElevenLabs 出来的声音偏小，她1105说听筒里好小，整体放大
 PREBUF = 0.8                            # 每句开头先攒这么多秒再发，扛隧道抖动
