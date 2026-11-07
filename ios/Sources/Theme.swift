@@ -10,7 +10,7 @@ extension Color {
     static let ccCrab = Color(red: 0xE8 / 255, green: 0x60 / 255, blue: 0x3C / 255)         // 螃蟹本色
     static let ccDim = Color.ccInk.opacity(0.55)
     static let ccBubbleCC = Color.white.opacity(0.80)
-    static let ccBubbleYou = Color.ccBlue.opacity(0.22)
+    static let ccBubbleYou = Color(red: 0xFF / 255, green: 0xD3 / 255, blue: 0xB8 / 255)   // #FFD3B8 她的气泡，蜜桃色（蓝的在浅底上发灰）
 }
 
 enum Who {
