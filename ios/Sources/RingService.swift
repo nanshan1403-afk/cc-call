@@ -82,7 +82,7 @@ final class RingService: NSObject, CXProviderDelegate {
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         onBeforeAnswer?()
         let s = AVAudioSession.sharedInstance()
-        try? s.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+        try? s.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP])
         onAnswer?()
         action.fulfill()
     }

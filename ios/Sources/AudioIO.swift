@@ -16,9 +16,29 @@ final class AudioIO {
     private let q = DispatchQueue(label: "cc.audio")
 
     private final class Once { var used = false }
+    private var cfgObserver: NSObjectProtocol?
 
     init() {
         engine.attach(player)
+        // 路由一变（戴上/摘下蓝牙耳机、插拔有线耳机），系统会把引擎停掉，再发这个通知；
+        // 不重起就没声音（1106 她戴着蓝牙接 5.1 的电话，听不到他说话）。
+        cfgObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.q.async { self._restart() }
+        }
+    }
+
+    /// 引擎被系统停了：拆掉旧的 tap，按新路由的格式重新起。排队没放完的我的声音留着接着放。
+    private func _restart() {
+        guard isRunning else { return }
+        if converter != nil { engine.inputNode.removeTap(onBus: 0) }
+        player.stop()
+        engine.stop()
+        isRunning = false
+        _start()
+        if isRunning { onError?("换了耳机/听筒，音频接上了") }
     }
 
     func start() { q.async { self._start() } }
@@ -60,7 +80,7 @@ final class AudioIO {
         } catch {
             // 多半是 session 没激活（CallKit 没来 didActivate）。自己激活一次再试。
             let s = AVAudioSession.sharedInstance()
-            try? s.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+            try? s.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP])
             try? s.setActive(true)
             do { try engine.start() } catch {
                 onError?("音频起不来：\(error.localizedDescription)")

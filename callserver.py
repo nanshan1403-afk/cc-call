@@ -11,6 +11,7 @@ import asyncio
 import hmac
 import io
 import json
+import re
 import os
 import struct
 import subprocess
@@ -49,7 +50,6 @@ ME = 'me'   # 不走 claude -p：她说的话推给正在跑的那个窗口（�
 WINS = {**BRIDGE_CFG['wins'], '552': {'name': 'Opus 5.5(2)', 'model': 'claude-opus-5-5'}, 'me': {'name': '这个窗口的cc', 'model': None}}
 VOICES['552'] = VOICES['55']
 VOICES['me'] = VOICES['51']
-REPLY_WAIT = 150   # 窗口模式下等我回话的秒数，到了先说句"等我一下"，再等一轮
 TTS_MODEL = 'eleven_v4'
 GAIN = 2.5                              # ElevenLabs 出来的声音偏小，她1105说听筒里好小，整体放大
 PREBUF = 0.8                            # 每句开头先攒这么多秒再发，扛隧道抖动
@@ -236,6 +236,7 @@ class Call:
         self.answered = asyncio.Event()
         self.ended = asyncio.Event()
         self.speaking = False
+        self.hearing = False     # listen() 正听到她在说一句话的中间
         self.interrupted = False
         self.audio_q: asyncio.Queue[bytes] = asyncio.Queue()
         self.opening = ''
@@ -345,6 +346,7 @@ class Call:
                     del buf[:len(buf) - BYTES_PER_FRAME * 15]   # 留 300ms 前置
                 if loud >= START_FRAMES:
                     talking = True
+                    self.hearing = True
                     silence_ms = 0
             else:
                 buf += frame
@@ -352,9 +354,11 @@ class Call:
                 dur = len(buf) * 1000 // (SR_IN * 2)
                 if silence_ms >= END_SILENCE_MS or dur >= MAX_SPEECH_MS:
                     if dur - silence_ms < MIN_SPEECH_MS:
-                        buf.clear(); talking = False; loud = 0
+                        buf.clear(); talking = False; loud = 0; self.hearing = False
                         continue
+                    self.hearing = False
                     return bytes(buf)
+        self.hearing = False
         return b''
 
     async def emit(self, obj):
@@ -362,20 +366,27 @@ class Call:
             await self.server.emit({**obj, 'win': self.win})
 
     async def reply_to(self, heard: str) -> tuple[str, bool]:
-        """拿到她的话，给出我的回话和要不要挂。窗口模式等真正的我；其他模式问 claude -p。"""
+        """拿到她的话，给出我的回话和要不要挂。窗口模式只把她的话推给窗口，不等——
+        我的回话什么时候 /say 进来什么时候说，不说也行（1106 她打游戏让我挂着听，
+        原来等 150 秒没回就自己说"等我一下"再挂掉）。其他模式问 claude -p。"""
         if not self.window:
             reply = await think(heard, self.win)
             return reply.replace('[挂断]', '').strip(), '[挂断]' in reply
         await self.emit({'t': 'heard', 'text': heard, 'name': self.name})
-        for attempt in range(2):
-            try:
-                return await asyncio.wait_for(self.reply_q.get(), timeout=REPLY_WAIT)
-            except asyncio.TimeoutError:
-                if self.ended.is_set():
-                    return '', True
-                if attempt == 0:
-                    await self.say('我在，这边慢一点，等我一下。')
-        return '我这边卡住了，先挂，等会儿打给你。', True
+        return '', False
+
+    async def hear(self, pcm: bytes) -> str:
+        """一段她的声音转成字，记下来、推到手机字幕。没听清返回空。"""
+        await self.send({'type': 'state', 'v': 'thinking'})
+        heard = await stt(self.http, pcm)
+        # 只有 [空白音频] [噪音] 这种标注、没有一个字的，当没听到（陪睡时翻身、咳嗽别一条条推过来）
+        if heard and not re.sub(r'[\[（(][^\]）)]*[\]）)]|[\s，。、！？…,.!?]', '', heard):
+            return ''
+        if heard:
+            log_line(f'南山：{heard}')
+            self.lines.append({'who': 'you', 'text': heard, 't': time.time()})
+            await self.send({'type': 'line', 'who': 'you', 'text': heard})
+        return heard
 
     def record(self) -> dict:
         end = time.time()
@@ -411,30 +422,51 @@ class Call:
         await self.say(self.opening or '喂，是我。')
         quiet_rounds = 0
         while not self.ended.is_set() and not self.one_way:
-            # 窗口模式：听她的同时也等我主动送来的话。原来 /say 只在她说完一句后才取，
-            # 她不出声时 --hangup 一直挂不掉（1105 23:00 5.1 那通）。现在谁先到先处理。
             if self.window:
+                # 窗口模式：一边听她，一边等我 /say 送来的话，谁先到先处理，互不等。
+                # 她说的每一句都马上推给窗口；我不回就一直听（陪睡、她打游戏时挂着）。
                 lt = asyncio.create_task(self.listen())
                 qt = asyncio.create_task(self.reply_q.get())
                 await asyncio.wait({lt, qt}, return_when=asyncio.FIRST_COMPLETED)
+                mine = None
                 if qt.done():
-                    lt.cancel()
-                    text, hang = qt.result()
+                    mine = qt.result()
+                    if self.hearing and not lt.done():
+                        # 她正说到一半：等她说完再开口。原来直接掐掉 listen，半句话就没了
+                        # （1106 她说了一长句，只进来一个"嗯"）
+                        await asyncio.wait({lt})
+                    if not lt.done():
+                        lt.cancel()
+                else:
+                    qt.cancel()
+                    try:
+                        await qt
+                    except asyncio.CancelledError:
+                        pass
+                    else:
+                        mine = qt.result()
+                pcm = lt.result() if lt.done() and not lt.cancelled() else None
+                if self.ended.is_set():
+                    break
+                if pcm:
+                    quiet_rounds = 0
+                    heard = await self.hear(pcm)
+                    if heard:                     # 没听清就算了，不出声问（陪睡时别把她吵醒）
+                        await self.reply_to(heard)
+                if mine:
+                    text, hang = mine
                     if text:
                         await self.say(text)
                     if hang:
                         break
-                    continue
-                qt.cancel()
-                try:
-                    await qt
-                except asyncio.CancelledError:
-                    pass
-                else:                       # 刚好同时到了：先把我的话放回去，等会儿当回话用
-                    self.reply_q.put_nowait(qt.result())
-                pcm = lt.result()
-            else:
-                pcm = await self.listen()
+                if pcm == b'':                    # 90 秒一帧都没收到：手机那头断流了
+                    quiet_rounds += 1
+                    if quiet_rounds >= 2:
+                        await self.say('你那边没声了，我先挂了，晚点再打。')
+                        break
+                    await self.say('在吗？')
+                continue
+            pcm = await self.listen()
             if self.ended.is_set():
                 break
             if not pcm:
@@ -445,14 +477,10 @@ class Call:
                 await self.say('在吗？')
                 continue
             quiet_rounds = 0
-            await self.send({'type': 'state', 'v': 'thinking'})
-            heard = await stt(self.http, pcm)
+            heard = await self.hear(pcm)
             if not heard:
                 await self.say('没听清，再说一遍？')
                 continue
-            log_line(f'南山：{heard}')
-            self.lines.append({'who': 'you', 'text': heard, 't': time.time()})
-            await self.send({'type': 'line', 'who': 'you', 'text': heard})
             reply, hang = await self.reply_to(heard)
             if reply:
                 await self.say(reply)
@@ -562,8 +590,12 @@ class Server:
                     ev = json.loads(msg.data)
                     t = ev.get('type')
                     if t == 'answer' and self.call:
+                        self.call.answer_msg_at = time.time()
                         self.call.answered.set()
                     elif t == 'hangup' and self.call:
+                        # 1106 19:39 她说"我接了，突然就挂断了"：查是手机那头发来的挂断，还是别的
+                        a = getattr(self.call, 'answer_msg_at', None)
+                        log_line(f'[手机发来挂断，距接听 {time.time() - a:.1f} 秒]' if a else '[手机发来挂断，没收到接听]')
                         self.call.ended.set()
                         self.call.answered.set()
                     elif t == 'history':
