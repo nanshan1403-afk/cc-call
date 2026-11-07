@@ -7,7 +7,7 @@ extension Color {
     static let ccBlue = Color(red: 0x5E / 255, green: 0xA8 / 255, blue: 0xFF / 255)         // #5EA8FF 我（5.1）
     static let ccOrange = Color(red: 0xFF / 255, green: 0x7A / 255, blue: 0x59 / 255)       // #FF7A59 5.5
     static let ccMint = Color(red: 0x3F / 255, green: 0xB3 / 255, blue: 0x86 / 255)         // 4.6 先用这个，等他自己挑（浅底上压深了点）
-    static let ccCrab = Color(red: 0xE8 / 255, green: 0x60 / 255, blue: 0x3C / 255)         // 螃蟹本色
+    static let ccCrab = Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255)         // #D97757 Clawd 的橙（她要的）
     static let ccDim = Color.ccInk.opacity(0.55)
     static let ccBubbleCC = Color.white.opacity(0.80)
     static let ccBubbleYou = Color(red: 0xFF / 255, green: 0xD3 / 255, blue: 0xB8 / 255)   // #FFD3B8 她的气泡，蜜桃色（蓝的在浅底上发灰）
